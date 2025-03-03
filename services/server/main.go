@@ -29,15 +29,8 @@ var devicesInfo *commons.DeviceMap
 
 func handleBrokerPackage(*queue.RingBuffer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
-	val := r.FormValue("name")
-	if val=="" {
-		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, "Name is required")
-		return
+		fmt.Fprintf(w, "Hello, %s!", "world")
 	}
-	fmt.Fprintf(w, "Hello, %s!", val)
-}
 }
 
 func handleServerPackage(*queue.RingBuffer) http.HandlerFunc {

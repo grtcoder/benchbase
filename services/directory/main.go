@@ -146,7 +146,7 @@ func main(){
 
 	// Graceful shutdown handling
 	server := &http.Server{
-		Addr:    ":8081",
+		Addr:    ":8080",
 		Handler: r,
 	}
 

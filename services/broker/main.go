@@ -20,20 +20,23 @@ import (
 )
 
 const (
-	DISPATCH_PERIOD = 1000
+	DISPATCH_PERIOD = 5000
 	NUM_SERVERS     = 5
 	BUFFER_SIZE = 10000
 )
 
-type DirectoryInfo struct {
-	
-}
 
+func CreatePackage(brokerID,packageCounter int,transactionArray *queue.RingBuffer) *commons.Package {
+	var transactions []*commons.Transaction
 
-func CreatePackage(brokerID,packageCounter int,lastTransaction *commons.Transaction,transactionArray *queue.RingBuffer) *commons.Package {
-	var pkg []*commons.Transaction
-
-	for transactionArray.Len()>0 {
+	// Whatever is the value of the transactionArray at this instant is the current package size. All packages added after this will be added to the next package 
+	packageSize := transactionArray.Len()
+	for packageSize>0 {
+		if(transactionArray.Len()==0) {
+			log.Printf("Transaction array is empty")
+			break
+		}
+		packageSize--
 		transaction,err := transactionArray.Poll(2*time.Second)
 		if err!=nil {
 			log.Printf("Error getting transaction from queue: %s",err)
@@ -44,13 +47,18 @@ func CreatePackage(brokerID,packageCounter int,lastTransaction *commons.Transact
 			log.Printf("Error type assertion for transaction failed %T failed",transaction)
 			continue
 		}
-		pkg=append(pkg,transaction.(*commons.Transaction))
+		transactions=append(transactions,transaction.(*commons.Transaction))
 	}
-	return &commons.Package{
+	
+	pkg := &commons.Package{
 		BrokerID:brokerID,
 		PackageCounter:packageCounter,
-		Transactions:pkg,
+		Transactions:transactions,
 	}
+
+	// Increment the package counter.
+	packageCounter++
+	return pkg
 }
 
 func handleTransactionRequest(q *queue.RingBuffer) func(http.ResponseWriter, *http.Request) {
@@ -66,7 +74,6 @@ func handleTransactionRequest(q *queue.RingBuffer) func(http.ResponseWriter, *ht
 		// Process the data
 		transaction := &commons.Transaction{}
 		json.Unmarshal(body, &transaction)
-		// ...
 
 		// Example: Print the data
 		log.Println("Received data:", transaction)
@@ -75,7 +82,7 @@ func handleTransactionRequest(q *queue.RingBuffer) func(http.ResponseWriter, *ht
 	}	
 }
 
-func handleDirectoryMessage(w http.ResponseWriter, r *http.Request) {
+func handleDevicesRequest(w http.ResponseWriter, r *http.Request) {
 	// Read data from request
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -132,7 +139,7 @@ func handleDirectoryMessage(w http.ResponseWriter, r *http.Request) {
 		return nil
 	}
 
-func broadcastDirectory(deviceInfo *commons.DeviceMap) error {
+func broadcastDirectory(brokerID int,deviceInfo *commons.DeviceMap) error {
 	var wg sync.WaitGroup
 
 	jsonData, err := json.Marshal(deviceInfo)
@@ -140,6 +147,11 @@ func broadcastDirectory(deviceInfo *commons.DeviceMap) error {
 		return fmt.Errorf("error encoding JSON: %v", err)
 	}
 	for id, node := range deviceInfo.BrokerMap.Data {
+
+		// Don't send to self.
+		if id==brokerID {
+			continue
+		}
 		wg.Add(1)
 		go func(id int, node *commons.NodeInfo) {
 			defer wg.Done()
@@ -172,20 +184,20 @@ func broadcastDirectory(deviceInfo *commons.DeviceMap) error {
 		}(id, node)
 	}
 	wg.Wait()
-	log.Printf("Broadcasted method complete.")
+	log.Printf("Broadcast method complete.")
 	return nil
 }
 
 func setupBroker(directoryAddr,brokerIP string,brokerPort int,lfreeQueue *queue.RingBuffer,deviceInfo *commons.DeviceMap,brokerID *int) (*http.Server,error) {
 	r := mux.NewRouter()
-	r.HandleFunc("/handleDirectoryPackage", handleDirectoryMessage).Methods("POST")
+	r.HandleFunc("/handleDirectoryPackage", handleDevicesRequest).Methods("POST")
 	r.HandleFunc("/handleTransaction", handleTransactionRequest(lfreeQueue)).Methods("POST")
 
 	if err := registerBroker(brokerID,directoryAddr,brokerIP,brokerPort,deviceInfo); err!=nil {
 		return nil,fmt.Errorf("error registering broker: %v",err)
 	}
 
-	if err := broadcastDirectory(deviceInfo); err!=nil {
+	if err := broadcastDirectory(*brokerID,deviceInfo); err!=nil {
 		return nil,fmt.Errorf("error registering broker: %v",err)
 	}
 
@@ -198,12 +210,15 @@ func setupBroker(directoryAddr,brokerIP string,brokerPort int,lfreeQueue *queue.
 
 func protocolDaemon(brokerID int,transactionArray *queue.RingBuffer,directoryInfo *commons.DeviceMap) {
 	packageCounter := 0
-	lastTransaction := &commons.Transaction{}
 
 	for {
+		log.Printf("Daemon routine is running...")
 		time.Sleep(DISPATCH_PERIOD * time.Millisecond)
 		packageCounter++
-		pkg := CreatePackage(brokerID, packageCounter, lastTransaction, transactionArray)
+		pkg := CreatePackage(brokerID, packageCounter, transactionArray)
+
+		log.Printf("package of size %d created\n", len(pkg.Transactions))
+
 		jsonData,err := json.Marshal(pkg)
 		if err!=nil {
 			log.Printf("Error marshalling package: %s",err)
