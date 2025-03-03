@@ -9,17 +9,16 @@ type NodeInfo struct {
 	Port int64 `json:"port"`
 }
 
-type InfoMap struct {
+type DirectoryMap struct {
 	Data map[int]*NodeInfo `json:"data"`
 	Version int `json:"version"`
 	sync.RWMutex
 }
 
-type DirectoryMessage struct {
-	ID int `json:"id"`
-	Info *InfoMap `json:"info"`
+type DeviceMap struct {
+	ServerMap *DirectoryMap `json:"serverMap"`
+	BrokerMap *DirectoryMap `json:"brokerMap"`
 }
-
 
 type Transaction struct {
 	Timestamp int64 `json:"timestamp"`
@@ -34,17 +33,17 @@ type Package struct {
 	Transactions []*Transaction `json:"transactions"`
 }
 
-func (m *InfoMap) Get(key int) (*NodeInfo,bool) {
+func (m *DirectoryMap) Get(key int) (*NodeInfo,bool) {
 	m.RLock()
 	defer m.RUnlock()
 	val, ok := m.Data[key]
 	return val,ok
 }
 
-func (m *InfoMap) SetVersion(version int) {
+func (m *DirectoryMap) SetVersion(version int) {
 	m.Version=version
 }
 
-func (m *InfoMap) Set(key int, value *NodeInfo) {
+func (m *DirectoryMap) Set(key int, value *NodeInfo) {
 	m.Data[key] = value
 }

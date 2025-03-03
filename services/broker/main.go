@@ -25,6 +25,10 @@ const (
 	BUFFER_SIZE = 10000
 )
 
+type DirectoryInfo struct {
+	
+}
+
 
 func CreatePackage(brokerID,packageCounter int,lastTransaction *commons.Transaction,transactionArray *queue.RingBuffer) *commons.Package {
 	var pkg []*commons.Transaction
@@ -81,7 +85,7 @@ func handleDirectoryMessage(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	// Process the data
-	transaction := &commons.InfoMap{}
+	transaction := &commons.DeviceMap{}
 	if err:=json.Unmarshal(body, &transaction); err!=nil {
 		log.Printf("Error unmarshalling JSON: %s",err)
 		http.Error(w, "Error unmarshalling JSON", http.StatusBadRequest)
@@ -90,41 +94,100 @@ func handleDirectoryMessage(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func setupBroker(directoryAddr,brokerIP string,brokerPort int,lfreeQueue *queue.RingBuffer) (*http.Server,error) {
+	// Create JSON payload
+	func registerBroker(brokerID *int,directoryAddr, brokerIP string, brokerPort int,directoryInfo *commons.DeviceMap) error {
+		data := map[string]interface{}{
+			"ip":   brokerIP,
+			"port": brokerPort,
+		}
+
+		jsonData, err := json.Marshal(data)
+		if err != nil {
+			return fmt.Errorf("error encoding JSON: %v", err)
+		}
+
+		resp, err := http.Post(fmt.Sprintf("%s/registerBroker", directoryAddr), "application/json", bytes.NewBuffer(jsonData))
+		if err != nil {
+			return fmt.Errorf("error sending request to directory: %v, could not start broker", err)
+		}
+
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		}
+
+		// Read response
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Println("Response:", string(body))
+
+		if err := json.Unmarshal(body, &directoryInfo); err != nil {
+			return fmt.Errorf("error unmarshalling JSON: %v", err)
+		}
+
+		log.Printf("directoryInfo: %#v\n",directoryInfo.BrokerMap)
+		*brokerID = directoryInfo.BrokerMap.Version
+
+		log.Printf("Setup complete. Broker registered with ID: %d", *brokerID)
+		return nil
+	}
+
+func broadcastDirectory(deviceInfo *commons.DeviceMap) error {
+	var wg sync.WaitGroup
+
+	jsonData, err := json.Marshal(deviceInfo)
+	if err != nil {
+		return fmt.Errorf("error encoding JSON: %v", err)
+	}
+	for id, node := range deviceInfo.BrokerMap.Data {
+		wg.Add(1)
+		go func(id int, node *commons.NodeInfo) {
+			defer wg.Done()
+
+			resp, err := http.Post(fmt.Sprintf("http://%s:%d/handleDirectoryPackage", node.IP, node.Port), "application/json", bytes.NewBuffer(jsonData))
+			if err != nil {
+				log.Printf("Error sending request to server %d: %s", id, err)
+				return
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				log.Printf("Unexpected status code: %d for server %d", resp.StatusCode, id)
+			}
+		}(id, node)
+	}
+	for id, node := range deviceInfo.ServerMap.Data {
+		wg.Add(1)
+		go func(id int, node *commons.NodeInfo) {
+			defer wg.Done()
+
+			resp, err := http.Post(fmt.Sprintf("http://%s:%d/handleDirectoryPackage", node.IP, node.Port), "application/json", bytes.NewBuffer(jsonData))
+			if err != nil {
+				log.Printf("Error sending request to server %d: %s", id, err)
+				return
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				log.Printf("Unexpected status code: %d for server %d", resp.StatusCode, id)
+			}
+		}(id, node)
+	}
+	wg.Wait()
+	log.Printf("Broadcasted method complete.")
+	return nil
+}
+
+func setupBroker(directoryAddr,brokerIP string,brokerPort int,lfreeQueue *queue.RingBuffer,deviceInfo *commons.DeviceMap,brokerID *int) (*http.Server,error) {
 	r := mux.NewRouter()
 	r.HandleFunc("/handleDirectoryPackage", handleDirectoryMessage).Methods("POST")
 	r.HandleFunc("/handleTransaction", handleTransactionRequest(lfreeQueue)).Methods("POST")
 
-	// Create JSON payload
-	data:=map[string]interface{}{
-		"ip":brokerIP,
-		"port":brokerPort,
+	if err := registerBroker(brokerID,directoryAddr,brokerIP,brokerPort,deviceInfo); err!=nil {
+		return nil,fmt.Errorf("error registering broker: %v",err)
 	}
 
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		return nil,fmt.Errorf("error encoding JSON: %v", err)
+	if err := broadcastDirectory(deviceInfo); err!=nil {
+		return nil,fmt.Errorf("error registering broker: %v",err)
 	}
-
-	resp,err := http.Post(fmt.Sprintf("%s/registerbroker",directoryAddr), "application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil,fmt.Errorf("error sending request to directory: %v, could not start broker", err)
-	}
-
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil,fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-	// Read response
-	body, _ := io.ReadAll(resp.Body)
-	fmt.Println("Response:", string(body))
-
-	directoryInfo := &commons.DirectoryMessage{}
-	if err:=json.Unmarshal(body, &directoryInfo); err!=nil {
-		return nil,fmt.Errorf("error unmarshalling JSON: %v", err)
-	}
-	
 
 	// Create HTTP request
 	return &http.Server{
@@ -133,7 +196,7 @@ func setupBroker(directoryAddr,brokerIP string,brokerPort int,lfreeQueue *queue.
 	},nil
 }
 
-func protocolDaemon(brokerID int,transactionArray *queue.RingBuffer) {
+func protocolDaemon(brokerID int,transactionArray *queue.RingBuffer,directoryInfo *commons.DeviceMap) {
 	packageCounter := 0
 	lastTransaction := &commons.Transaction{}
 
@@ -141,13 +204,30 @@ func protocolDaemon(brokerID int,transactionArray *queue.RingBuffer) {
 		time.Sleep(DISPATCH_PERIOD * time.Millisecond)
 		packageCounter++
 		pkg := CreatePackage(brokerID, packageCounter, lastTransaction, transactionArray)
+		jsonData,err := json.Marshal(pkg)
+		if err!=nil {
+			log.Printf("Error marshalling package: %s",err)
+			continue
+		}
 		var wg sync.WaitGroup
-		for i := 0; i < NUM_SERVERS; i++ {
+		for serverID, node := range directoryInfo.ServerMap.Data {
 			wg.Add(1)
-			go func(i int) {
+			go func(serverID int,node *commons.NodeInfo) {
 				defer wg.Done()
-				http.Post()
-			}(i)
+
+				if err!=nil {
+					log.Printf("Server: %d, Error marshalling node info: %s",serverID,err)
+					return
+				}
+				resp,err := http.Post(fmt.Sprintf("http://%s:%d/brokerPackage",node.IP,node.Port),"application/json", bytes.NewBuffer(jsonData))
+				if err!=nil {
+					log.Printf("Error sending request to server %d: %s",serverID,err)
+					return
+				}
+				if resp.StatusCode != http.StatusOK {
+					log.Printf("Unexpected status code: %d for server %d", resp.StatusCode,serverID)
+				}
+			}(serverID,node)
 		}
 		wg.Wait()
 	}
@@ -185,11 +265,14 @@ func main() {
 
 	// Create directory address to send initial setup request.
 	directoryAddr := fmt.Sprintf("http://%s:%d", directoryIP, directoryPort)
-
+	brokerID := 0
 	// Create a lock-free queue to store the incoming transactions
 	transactionArray := queue.NewRingBuffer(BUFFER_SIZE)
-
-	server,err := setupBroker(directoryAddr,brokerIP,brokerPort,transactionArray)
+	directoryInfo := &commons.DeviceMap{
+		ServerMap: &commons.DirectoryMap{Data: make(map[int]*commons.NodeInfo)},
+		BrokerMap: &commons.DirectoryMap{Data: make(map[int]*commons.NodeInfo)},
+	}
+	server,err := setupBroker(directoryAddr,brokerIP,brokerPort,transactionArray,directoryInfo,&brokerID)
 	if err != nil {
 		log.Fatalf("Error setting up broker: %v", err)
 	}
@@ -204,7 +287,7 @@ func main() {
 	fmt.Println("broker running on http://localhost:8080")
 
 	go func() {
-		protocolDaemon(transactionArray)
+		protocolDaemon(brokerID,transactionArray,directoryInfo)
 		defer fmt.Println("Daemon routine stopped.")
 	}()
 	quit := make(chan os.Signal, 1)

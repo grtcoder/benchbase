@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"io"
+	"lockfreemachine/pkg/commons"
 	"os/signal"
 	"time"
 	"bytes"
@@ -23,6 +24,8 @@ const (
 	BUFFER_SIZE=10000
 	isReady=false
  )
+
+var devicesInfo *commons.DeviceMap
 
 func handleBrokerPackage(*queue.RingBuffer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -51,7 +54,7 @@ func handleServerPackage(*queue.RingBuffer) http.HandlerFunc {
 	}
 }
 
-func setupServer(directoryAddr,serverIP string,serverPort int,lfreeQueue *queue.RingBuffer) (*http.Server,error) {
+func setupServer(directoryAddr,serverIP string,serverPort int,lfreeQueue *queue.RingBuffer,devicesInfo *commons.DeviceMap) (*http.Server,error) {
 	r := mux.NewRouter()
 	r.HandleFunc("/", handleDirectoryMessage).Methods("POST")
 	r.HandleFunc("/brokerPackage", handleBrokerPackage(lfreeQueue)).Methods("POST")
@@ -77,10 +80,15 @@ func setupServer(directoryAddr,serverIP string,serverPort int,lfreeQueue *queue.
 	if resp.StatusCode != http.StatusOK {
 		return nil,fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
+
 	// Read response
 	body, _ := io.ReadAll(resp.Body)
 	fmt.Println("Response:", string(body))
 
+	if err := json.Unmarshal(body, devicesInfo); err != nil {
+		return nil,fmt.Errorf("error unmarshalling JSON: %v", err)
+	}
+	fmt.Printf("DevicesInfo: %#v\n",devicesInfo.ServerMap.Data)
 	// Create HTTP request
 	return &http.Server{
 		Addr:    fmt.Sprintf(":%d", serverPort),
@@ -146,16 +154,23 @@ func main() {
 		log.Fatalf("serverPort is required")
 	}
 
+	devicesInfo = &commons.DeviceMap{
+		ServerMap: &commons.DirectoryMap{
+			Data: make(map[int]*commons.NodeInfo),
+		},
+		BrokerMap: &commons.DirectoryMap{
+			Data: make(map[int]*commons.NodeInfo),
+		},
+	}
 	// Create directory address to send initial setup request.
 	directoryAddr := fmt.Sprintf("http://%s:%d", directoryIP, directoryPort)
 
 	lfreeQueue := queue.NewRingBuffer(10)
 
-	server,err := setupServer(directoryAddr,serverIP,serverPort,lfreeQueue)
+	server,err := setupServer(directoryAddr,serverIP,serverPort,lfreeQueue,devicesInfo)
 	if err != nil {
 		log.Fatalf("Error setting up server: %v", err)
 	}
-
 
 	// Graceful shutdown handling
 	go func() {
