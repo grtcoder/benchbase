@@ -17,7 +17,7 @@ import (
 
 
 
-var deviceInfo *commons.DeviceMap
+var deviceInfo *commons.NodesMap
 
 // This will also serve as the version of the broker information.
 var latestBrokerID int
@@ -129,7 +129,7 @@ func registerServer(w http.ResponseWriter, r *http.Request) {
 
 func main(){
 	latestBrokerID = 0
-	deviceInfo = &commons.DeviceMap{
+	deviceInfo = &commons.NodesMap{
 		ServerMap: &commons.DirectoryMap{
 			Data: make(map[int]*commons.NodeInfo),
 			Version: 0,
@@ -141,8 +141,8 @@ func main(){
 	}
 
 	r := mux.NewRouter()
-	r.HandleFunc(commons.BROKER_DIRECTORY_REGISTER, registerBroker).Methods("POST")
-	r.HandleFunc(commons.SERVER_DIRECTORY_REGISTER, registerServer).Methods("POST")
+	r.HandleFunc(commons.DIRECTORY_REGISTER_BROKER, registerBroker).Methods("POST")
+	r.HandleFunc(commons.DIRECTORY_REGISTER_SERVER, registerServer).Methods("POST")
 
 	// Graceful shutdown handling
 	server := &http.Server{

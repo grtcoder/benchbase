@@ -30,7 +30,7 @@ type Server struct {
 	port int
 	directoryAddr string
 	serverID int
-	nodeInfo *commons.DeviceMap
+	nodeInfo *commons.NodesMap
 	brokerStatus map[int]bool
 	serverStatus map[int]bool
 	answer map[int]map[int]*commons.Package
@@ -170,9 +170,9 @@ func (s *Server) handleRequestPackage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) setupServer() (*http.Server,error) {
 	r := mux.NewRouter()
-	r.HandleFunc("/nodesPackage", handleNodesMessage).Methods("POST")
-	r.HandleFunc("/addPackage", s.handleAddPackage).Methods("POST")
-	r.HandleFunc("/requestPackage", s.handleRequestPackage).Methods("GET")
+	r.HandleFunc(commons.SERVER_UPDATE_DIRECTORY, handleUpdateDirectory).Methods("POST")
+	r.HandleFunc(commons.SERVER_ADD_PACKAGE, s.handleAddPackage).Methods("POST")
+	r.HandleFunc(commons.SERVER_REQUEST_PACKAGE, s.handleRequestPackage).Methods("GET")
 
 	// Create JSON payload
 	data:=map[string]interface{}{
@@ -220,7 +220,7 @@ func (b *Server) protocolDaemon() {
 	}
 }
 
-func handleNodesMessage(w http.ResponseWriter, r *http.Request) {
+func handleUpdateDirectory(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
 	var data map[string]interface{}
 	err := json.NewDecoder(r.Body).Decode(&data)
@@ -273,7 +273,7 @@ func main() {
 		ip: serverIP,
 		port: serverPort,
 		directoryAddr: fmt.Sprintf("http://%s:%d", directoryIP, directoryPort),
-		nodeInfo: &commons.DeviceMap{},
+		nodeInfo: &commons.NodesMap{},
 		brokerStatus: make(map[int]bool),
 		serverStatus: make(map[int]bool),
 		answer: make(map[int]map[int]*commons.Package),

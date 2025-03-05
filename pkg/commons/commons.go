@@ -15,9 +15,26 @@ type DirectoryMap struct {
 	sync.RWMutex
 }
 
-type DeviceMap struct {
+type NodesMap struct {
 	ServerMap *DirectoryMap `json:"serverMap"`
 	BrokerMap *DirectoryMap `json:"brokerMap"`
+}
+
+
+func (n *NodesMap) CheckAndUpdateServerMap(newServerMap *DirectoryMap) {
+	n.ServerMap.Lock()
+	defer n.ServerMap.Unlock()
+	if n.ServerMap.Version < newServerMap.Version {
+		n.ServerMap = newServerMap
+	}
+}
+
+func (n *NodesMap) CheckAndUpdateBrokerMap(newBrokerMap *DirectoryMap) {
+	n.BrokerMap.Lock()
+	defer n.BrokerMap.Unlock()
+	if n.BrokerMap.Version < newBrokerMap.Version {
+		n.BrokerMap = newBrokerMap
+	}
 }
 
 type Transaction struct {
