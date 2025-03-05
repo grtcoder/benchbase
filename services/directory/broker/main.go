@@ -82,7 +82,7 @@ func handleTransactionRequest(q *queue.RingBuffer) func(http.ResponseWriter, *ht
 	}	
 }
 
-func handleDevicesRequest(w http.ResponseWriter, r *http.Request) {
+func handleNodesRequest(w http.ResponseWriter, r *http.Request) {
 	// Read data from request
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -139,7 +139,7 @@ func handleDevicesRequest(w http.ResponseWriter, r *http.Request) {
 		return nil
 	}
 
-func broadcastDirectory(brokerID int,deviceInfo *commons.DeviceMap) error {
+func broadcastNodesInfo(brokerID int,deviceInfo *commons.DeviceMap) error {
 	var wg sync.WaitGroup
 
 	jsonData, err := json.Marshal(deviceInfo)
@@ -190,14 +190,14 @@ func broadcastDirectory(brokerID int,deviceInfo *commons.DeviceMap) error {
 
 func setupBroker(directoryAddr,brokerIP string,brokerPort int,lfreeQueue *queue.RingBuffer,deviceInfo *commons.DeviceMap,brokerID *int) (*http.Server,error) {
 	r := mux.NewRouter()
-	r.HandleFunc("/handleDirectoryPackage", handleDevicesRequest).Methods("POST")
-	r.HandleFunc("/handleTransaction", handleTransactionRequest(lfreeQueue)).Methods("POST")
+	r.HandleFunc("/updateNodesPackage", handleNodesRequest).Methods("POST")
+	r.HandleFunc("/addTransaction", handleTransactionRequest(lfreeQueue)).Methods("POST")
 
 	if err := registerBroker(brokerID,directoryAddr,brokerIP,brokerPort,deviceInfo); err!=nil {
 		return nil,fmt.Errorf("error registering broker: %v",err)
 	}
 
-	if err := broadcastDirectory(*brokerID,deviceInfo); err!=nil {
+	if err := broadcastNodesInfo(*brokerID,deviceInfo); err!=nil {
 		return nil,fmt.Errorf("error registering broker: %v",err)
 	}
 
