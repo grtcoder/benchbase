@@ -58,40 +58,6 @@ func registerBroker(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(deviceInfo)
 }
 
-func registerNode(nodeInfo *commons.DirectoryMap,counter *int) func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Read the JSON body
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "Failed to read request body", http.StatusBadRequest)
-			return
-		}
-		defer r.Body.Close() // Close body after reading
-
-		nodeInfo.Lock()
-		nodeID := *counter
-
-		currNode:=&commons.NodeInfo{}
-		if err=json.Unmarshal(body,&currNode);err!=nil {
-			log.Printf("error while unmarshalling broker info, error: %s",err)
-			http.Error(w, "Invalid JSON sent by broker", http.StatusBadRequest)
-			return
-		}
-
-		nodeInfo.Set(nodeID, currNode)
-		nodeInfo.SetVersion(latestBrokerID)
-		latestBrokerID++
-
-		nodeInfo.Unlock()
-
-		log.Printf("Broker registered with ID: %d",nodeID)
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(deviceInfo)
-	}
-}
-
 func registerServer(w http.ResponseWriter, r *http.Request) {
 	// Read the JSON body
 	body, err := io.ReadAll(r.Body)

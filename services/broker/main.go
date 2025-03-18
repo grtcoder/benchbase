@@ -168,12 +168,14 @@ func (b *Broker) handleUpdateDirectory(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	// Process the data
-	newNodesMap := &commons.NodesMap{}
-	if err := json.Unmarshal(body, &newNodesMap); err != nil {
+	newDirectoryMap := &commons.NodesMap{}
+	if err := json.Unmarshal(body, &newDirectoryMap); err != nil {
 		log.Printf("Error unmarshalling JSON: %s", err)
 		http.Error(w, "Error unmarshalling JSON", http.StatusBadRequest)
 		return
 	}
+
+	b.DirectoryInfo.CheckAndUpdateMap(newDirectoryMap)
 
 	w.WriteHeader(http.StatusOK)
 }

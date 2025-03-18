@@ -11,6 +11,7 @@ import (
 	"lockfreemachine/pkg/commons"
 	"os/signal"
 	"time"
+	"sync"
 	"strconv"
 	"bytes"
 
@@ -21,8 +22,9 @@ import (
 )
 
 const ( 
-	TIMER=5*time.Second
+	PROTOCOL_TIMER=5*time.Second
 	BUFFER_SIZE=10000
+	WAIT_FOR_BROKER_TIMER=2*time.Second
 )
 
 type Server struct {
@@ -34,7 +36,23 @@ type Server struct {
 	brokerStatus map[int]bool
 	serverStatus map[int]bool
 	answer map[int]map[int]*commons.Package
+	answerLock sync.RWMutex
 	lfreeQueue *queue.RingBuffer
+}
+
+func (s *Server) setOrGetPackage(brokerID,packageCounter int) *commons.Package {
+	// Using global lock whereEver this method is used, so no need for locking here.
+	if s.answer[brokerID]==nil {
+		s.answer[brokerID]=make(map[int]*commons.Package)
+	}
+	if s.answer[brokerID][packageCounter]==nil {
+		s.answer[brokerID][packageCounter]=&commons.Package{
+			State: commons.Undefined,
+			BrokerID: brokerID,
+			PackageCounter: packageCounter,
+		}
+	}
+	return s.answer[brokerID][packageCounter]
 }
 
 func (s *Server) writeToFile(pkg *commons.Package) {
@@ -125,6 +143,12 @@ func (s *Server) handleAddPackage(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("Package: %#v\n",pkg)
 
 		s.lfreeQueue.Put(pkg)
+		s.answerLock.Lock()
+		defer s.answerLock.Unlock()
+
+		currPkg:=s.setOrGetPackage(pkg.BrokerID,pkg.PackageCounter)
+		if s.answer[pkg.BrokerID][pkg.PackageCounter].State!=commons.IgnoreBroker {
+		}
 		s.answer[pkg.BrokerID][pkg.PackageCounter] = pkg
 		w.WriteHeader(http.StatusOK)
 }
@@ -204,6 +228,11 @@ func (s *Server) setupServer() (*http.Server,error) {
 		return nil,fmt.Errorf("error unmarshalling JSON: %v", err)
 	}
 	fmt.Printf("DevicesInfo: %#v\n",s.nodeInfo.ServerMap.Data)
+
+
+	// Since we locking the directory service, we can safely assume that the version is the same as the serverID
+	s.serverID = s.nodeInfo.ServerMap.Version
+
 	// Create HTTP request
 	return &http.Server{
 		Addr:    fmt.Sprintf(":%d", s.port),
@@ -215,7 +244,7 @@ func (s *Server) setupServer() (*http.Server,error) {
 func (b *Server) protocolDaemon() {
 	// Daemon routine
 	for {
-		time.Sleep(TIMER)
+		time.Sleep(PROTOCOL_TIMER)
 		fmt.Println("Daemon routine is running...")		
 	}
 }
@@ -291,12 +320,14 @@ func main() {
 			fmt.Println("Server Error:", err)
 		}
 	}()
+
 	fmt.Println("Server running on http://localhost:8080")
 
 	go func() {
 		server.protocolDaemon()
 		defer fmt.Println("Daemon routine stopped.")
 	}()
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt)
 	<-quit
