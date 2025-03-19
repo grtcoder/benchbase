@@ -54,10 +54,11 @@ type State int32
 
 // Declare constants using iota
 const (
-	Undefined State = iota
-	NotReceived State = 1
-	Received State = 2
-	IgnoreBroker State = 3
+	Null State = iota
+	Undefined State = 1
+	NotReceived State = 2
+	Received State = 3
+	IgnoreBroker State = 4
 )
 
 type Package struct {

@@ -1,12 +1,8 @@
 package commons
 
 import (
-	"fmt"
-	// "sync"
+	"sync"
 	"testing"
-	"runtime"
-	"time"
-
 )
 
 func TestBasic(t *testing.T) {
@@ -39,11 +35,10 @@ func TestBasic(t *testing.T) {
 }
 
 func TestRaceUpdates(t *testing.T) {
-	runtime.GOMAXPROCS(40)
 	// TC1: Check Initialization
 	list := NewStateList()
-	if list.GetState() != int32(Undefined) {
-			t.Errorf("Expected state to be Undefined, got %d", list.GetState())
+	if list.GetState() != int32(Null) {
+			t.Errorf("Expected state to be Null, got %d", list.GetState())
 	}
 
 	threadsData := [][]State{
@@ -54,54 +49,60 @@ func TestRaceUpdates(t *testing.T) {
 	}
 	expectedList := []State{}
 	ch := make(chan State) // Creates a channel that carries integers
-	t.Run("TestMain", func (t *testing.T)   {
-		t.Parallel()
+
+	var finalWg sync.WaitGroup
+	finalWg.Add(1)
+	go func()   {
+		defer finalWg.Done()
 		for {
-			select {
-			case state:= <-ch:
+				state,ok := <-ch
+				if !ok {
+					break
+				}
 				expectedList = append(expectedList, state)
-			case <-time.After(5 * time.Second):
-				t.Log("Not reading channel")
-				temp := list.head
-				ind := len(expectedList) - 1
-				for temp != nil {
-					t.Logf("Thread %d: State %d", ind, temp.getState())
-					if temp.getState() != int32(expectedList[ind]) {
-						t.Fatalf("Expected state to be %d, got %d", expectedList[ind], temp.getState())
-					}
-					temp = temp.next
-					ind--
-				}
-				if ind != -1 {
-					t.Fatalf("Expected state to be %d, got %d", expectedList[ind], temp.getState())
-				}
-				if len(expectedList) == 0 {
-					t.Fatal("Timeout: No states received")
-				}
-				return
-			}
 		}
-	})
-	for outerID, thread := range threadsData {
+	}()
+	var wg sync.WaitGroup
+	for _, thread := range threadsData {
 		thread := thread
-		outerID := outerID
 		for id, state := range thread {
 			id := id
 			state := state
-			t.Run(fmt.Sprintf("TestNew#%d#%d",outerID,id), func(t *testing.T) {
-				t.Parallel()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
 				newNode := &stateNode{
 					val: &stateValue{},
 				}
 				newNode.setState(state)
-				if done:=list.UpdateState(list.head,newNode); done{
-					t.Logf("Thread %d: Updated state to %d", outerID, state)
-					ch <- state
-					} else {
-					t.Logf("Thread %d: Failed to update state to %d", id, state)
-				}			
-			})
+
+				done := false
+				for !done {
+					done=list.UpdateState(list.head,newNode)
+					if !done {
+						t.Logf("Thread %d: Failed to update state to %d", id, state)
+					}
+				}	
+				ch <- state		
+			}()
 		}
 	}
-	
+	wg.Wait()
+	close(ch)
+	finalWg.Wait()
+	temp := list.head
+	ind := len(expectedList) - 1
+	for temp.getState() != int32(Null) {
+		if temp.getState() != int32(expectedList[ind]) {
+			t.Fatalf("Expected state to be %d, got %d", expectedList[ind], temp.getState())
+		}
+		temp = temp.next
+		ind--
+	}
+	if ind != -1 {
+		t.Fatalf("Expected state to be %d, got %d", expectedList[ind], temp.getState())
+	}
+	if len(expectedList) == 0 {
+		t.Fatal("Timeout: No states received")
+	}
 }

@@ -38,7 +38,7 @@ type stateList struct {
 func (l *stateList) GetState() int32 {
 	// Return the state of the head node atomically.
 	if l.head == nil {
-		return int32(Undefined)
+		return int32(Null)
 	}
 	return l.head.getState()
 }
@@ -57,7 +57,10 @@ func (l *stateList) UpdateState(currHead,newState *stateNode) bool {
 func NewStateList() *stateList {
 	ptr :=&stateList{
 		// Initialize the head node with a nil state and pkg value.
-		head: nil,
+		head: &stateNode{
+			val: &stateValue{},
+		},
 	}
+	ptr.head.setState(Null)
 	return ptr
 }
