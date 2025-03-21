@@ -271,7 +271,6 @@ func (b *Broker) CreatePackage(packageCounter int) *commons.Package {
 
 	pkg := &commons.Package{
 		BrokerID:       b.ID,
-		PackageCounter: packageCounter,
 		Transactions:   transactions,
 	}
 

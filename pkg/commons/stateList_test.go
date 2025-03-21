@@ -13,20 +13,20 @@ func TestBasic(t *testing.T) {
 	}
 
 	// TC2: Check State Update
-	newNode := &stateNode{val: &stateValue{}}
+	newNode := &StateNode{val: &StateValue{}}
 	newNode.val.setState(Received)
 	if !list.UpdateState(list.head, newNode){
 		t.Errorf("Failed to update state to Received")
 	}
-	if list.GetState() != newNode.getState() {
-		t.Errorf("Expected state to be %d, got %d", newNode.getState(), list.GetState())
+	if list.GetState() != newNode.GetState() {
+		t.Errorf("Expected state to be %d, got %d", newNode.GetState(), list.GetState())
 	}
 
 	// TC3: Check series of updates
-	ls := []State{NotReceived, Received, IgnoreBroker, Undefined}
+	ls := []int32{NotReceived, Received, IgnoreBroker, Undefined}
 	
 	for _, state := range ls {
-		newNode := &stateNode{val: &stateValue{}}
+		newNode := &StateNode{val: &StateValue{}}
 		newNode.val.setState(state)
 		if !list.UpdateState(list.head, newNode) {
 			t.Errorf("Failed to update state to %d", state)
@@ -41,14 +41,14 @@ func TestRaceUpdates(t *testing.T) {
 			t.Errorf("Expected state to be Null, got %d", list.GetState())
 	}
 
-	threadsData := [][]State{
+	threadsData := [][]int32{
 			{NotReceived, Received, IgnoreBroker, Undefined, NotReceived},
 			{Received, IgnoreBroker, Undefined, NotReceived},
 			{IgnoreBroker, Undefined, NotReceived, Received},
 			{Undefined, NotReceived, Received, IgnoreBroker},
 	}
-	expectedList := []State{}
-	ch := make(chan State) // Creates a channel that carries integers
+	expectedList := []int32{}
+	ch := make(chan int32) // Creates a channel that carries integers
 
 	var finalWg sync.WaitGroup
 	finalWg.Add(1)
@@ -71,8 +71,8 @@ func TestRaceUpdates(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				newNode := &stateNode{
-					val: &stateValue{},
+				newNode := &StateNode{
+					val: &StateValue{},
 				}
 				newNode.setState(state)
 
@@ -92,15 +92,15 @@ func TestRaceUpdates(t *testing.T) {
 	finalWg.Wait()
 	temp := list.head
 	ind := len(expectedList) - 1
-	for temp.getState() != int32(Null) {
-		if temp.getState() != int32(expectedList[ind]) {
-			t.Fatalf("Expected state to be %d, got %d", expectedList[ind], temp.getState())
+	for temp.GetState() != int32(Null) {
+		if temp.GetState() != int32(expectedList[ind]) {
+			t.Fatalf("Expected state to be %d, got %d", expectedList[ind], temp.GetState())
 		}
 		temp = temp.next
 		ind--
 	}
 	if ind != -1 {
-		t.Fatalf("Expected state to be %d, got %d", expectedList[ind], temp.getState())
+		t.Fatalf("Expected state to be %d, got %d", expectedList[ind], temp.GetState())
 	}
 	if len(expectedList) == 0 {
 		t.Fatal("Timeout: No states received")

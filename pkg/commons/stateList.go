@@ -5,45 +5,60 @@ import (
 	"unsafe"
 )
 
-type stateValue struct {
-	state atomic.Int32
-	pkg *Package 
+type StateValue struct {
+	State int32
+	Pkg *Package 
 }
 
-func (s *stateValue) setState(state State) {
-	s.state.Store(int32(state))
+func (s *StateValue)  setState(state int32){
+	s.State=state
+}
+func (s * StateValue) getState() int32 {
+	return s.State
+}
+func (s *StateValue) getPackage() *Package {
+	return s.Pkg
 }
 
-func (s * stateValue) getState() int32 {
-	return s.state.Load()
+type StateNode struct {
+	val *StateValue
+	next *StateNode
 }
 
-type stateNode struct {
-	val *stateValue
-	next *stateNode
+func NewStateNode(value *StateValue) *StateNode {
+	return &StateNode{
+		val: value,
+	}
 }
 
-func (n *stateNode) setState(state State) {
+func (n *StateNode) setState(state int32) {
 	n.val.setState(state)
 }
 
-func (n *stateNode) getState() int32 {
+func (n *StateNode) GetState() int32 {
 	return n.val.getState()
 }
 
-type stateList struct {
-	head *stateNode
+func (n *StateNode) GetPackage() *Package {
+	return n.val.getPackage()
 }
 
-func (l *stateList) GetState() int32 {
+type StateList struct {
+	head *StateNode
+}
+
+func (l *StateList) GetState() int32 {
 	// Return the state of the head node atomically.
 	if l.head == nil {
 		return int32(Null)
 	}
-	return l.head.getState()
+	return l.head.GetState()
+}
+func (l *StateList) GetHead() *StateNode {
+	return l.head
 }
 
-func (l *stateList) UpdateState(currHead,newState *stateNode) bool {
+func (l *StateList) UpdateState(currHead,newState *StateNode) bool {
 	// set the next pointer of the new state to the current head
 	// in case of a successful swap. Otherswise, it does not matter
 	// since the newState is not part of the linked list.
@@ -54,11 +69,11 @@ func (l *stateList) UpdateState(currHead,newState *stateNode) bool {
 }
 
 
-func NewStateList() *stateList {
-	ptr :=&stateList{
+func NewStateList() *StateList {
+	ptr :=&StateList{
 		// Initialize the head node with a nil state and pkg value.
-		head: &stateNode{
-			val: &stateValue{},
+		head: &StateNode{
+			val: &StateValue{},
 		},
 	}
 	ptr.head.setState(Null)

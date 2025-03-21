@@ -11,7 +11,6 @@ import (
 	"lockfreemachine/pkg/commons"
 	"os/signal"
 	"time"
-	"sync"
 	"strconv"
 	"bytes"
 
@@ -35,24 +34,27 @@ type Server struct {
 	nodeInfo *commons.NodesMap
 	brokerStatus map[int]bool
 	serverStatus map[int]bool
-	answer map[int]map[int]*commons.Package
-	answerLock sync.RWMutex
+	answer map[int]*commons.StateList
 	lfreeQueue *queue.RingBuffer
 }
 
-func (s *Server) setOrGetPackage(brokerID,packageCounter int) *commons.Package {
-	// Using global lock whereEver this method is used, so no need for locking here.
-	if s.answer[brokerID]==nil {
-		s.answer[brokerID]=make(map[int]*commons.Package)
+func (s *Server) setupAnswerMap() {
+
+	// reset map before beginning another iteration.
+	s.answer=make(map[int]*commons.StateList)
+	for k := range s.serverStatus {
+		s.answer[k]=commons.NewStateList()
 	}
-	if s.answer[brokerID][packageCounter]==nil {
-		s.answer[brokerID][packageCounter]=&commons.Package{
-			State: commons.Undefined,
-			BrokerID: brokerID,
-			PackageCounter: packageCounter,
-		}
+}
+
+func (s *Server) GetState(brokerID int) *commons.StateNode {
+	stateList,ok := s.answer[brokerID]
+	if !ok {
+		return nil
 	}
-	return s.answer[brokerID][packageCounter]
+	currHead := stateList.GetHead()
+	
+	return currHead
 }
 
 func (s *Server) writeToFile(pkg *commons.Package) {
@@ -128,6 +130,26 @@ func (s *Server) readPackage(brokerID, packageCounter int) (*commons.Package, er
 
 
 func (s *Server) handleAddPackage(w http.ResponseWriter, r *http.Request) {
+		params := r.URL.Query()
+		brokerID := params.Get("brokerID")
+		brokerIDInt,err := strconv.Atoi(brokerID)
+		if err!=nil {
+			log.Printf("Invalid brokerID in request: %s: error: %s",brokerID,err)
+			w.WriteHeader(http.StatusExpectationFailed)
+			return
+		}
+		currHead:=s.GetState(brokerIDInt)
+		if currHead==nil{
+			log.Printf("")
+			w.WriteHeader(http.StatusExpectationFailed)
+			return
+		}
+		if currHead.GetState()==commons.Undefined {
+			log.Printf("Dropping package for brokerID: %d, since IgnoreBroker state is set",currHead.GetState())
+			w.WriteHeader(http.StatusExpectationFailed)
+			return
+		}
+
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "Failed to read request body", http.StatusBadRequest)
@@ -142,14 +164,9 @@ func (s *Server) handleAddPackage(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Printf("Package: %#v\n",pkg)
 
+	
+		s.answer[pkg.BrokerID].UpdateState(currHead,commons.NewStateNode(&commons.StateValue{State: commons.Received,Pkg: pkg}))
 		s.lfreeQueue.Put(pkg)
-		s.answerLock.Lock()
-		defer s.answerLock.Unlock()
-
-		currPkg:=s.setOrGetPackage(pkg.BrokerID,pkg.PackageCounter)
-		if s.answer[pkg.BrokerID][pkg.PackageCounter].State!=commons.IgnoreBroker {
-		}
-		s.answer[pkg.BrokerID][pkg.PackageCounter] = pkg
 		w.WriteHeader(http.StatusOK)
 }
 
@@ -241,12 +258,14 @@ func (s *Server) setupServer() (*http.Server,error) {
 }
 
 
-func (b *Server) protocolDaemon() {
+func (s *Server) protocolDaemon() {
 	// Daemon routine
 	for {
+		s.setupAnswerMap()
 		time.Sleep(PROTOCOL_TIMER)
 		fmt.Println("Daemon routine is running...")		
 	}
+
 }
 
 func handleUpdateDirectory(w http.ResponseWriter, r *http.Request) {
@@ -305,7 +324,7 @@ func main() {
 		nodeInfo: &commons.NodesMap{},
 		brokerStatus: make(map[int]bool),
 		serverStatus: make(map[int]bool),
-		answer: make(map[int]map[int]*commons.Package),
+		answer: make(map[int]*commons.StateList),
 		lfreeQueue: queue.NewRingBuffer(BUFFER_SIZE),
 	}
 

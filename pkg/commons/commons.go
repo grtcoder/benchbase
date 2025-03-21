@@ -49,20 +49,18 @@ type Transaction struct {
 	Value string `json:"value"`
 }
 
-// Define a new type
-type State int32
 
 // Declare constants using iota
 const (
-	Null State = iota
-	Undefined State = 1
-	NotReceived State = 2
-	Received State = 3
-	IgnoreBroker State = 4
+	Null  int32 = iota
+	Undefined  int32 = 1
+	NotReceived  int32 = 2
+	Received  int32 = 3
+	IgnoreBroker int32  = 4
 )
 
 type Package struct {
-	State State `json:"state"`
+	State int32 `json:"state"`
 	BrokerID int `json:"brokerID"`
 	PackageCounter int `json:"packageCounter"`
 	Transactions []*Transaction `json:"transactions"`
