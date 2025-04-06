@@ -37,7 +37,7 @@ func TestBasic(t *testing.T) {
 func TestRaceUpdates(t *testing.T) {
 	// TC1: Check Initialization
 	list := NewStateList()
-	if list.GetState() != int32(Null) {
+	if list.GetState() != Undefined {
 			t.Errorf("Expected state to be Null, got %d", list.GetState())
 	}
 
@@ -92,7 +92,7 @@ func TestRaceUpdates(t *testing.T) {
 	finalWg.Wait()
 	temp := list.head
 	ind := len(expectedList) - 1
-	for temp.GetState() != int32(Null) {
+	for temp.GetState() != Undefined {
 		if temp.GetState() != int32(expectedList[ind]) {
 			t.Fatalf("Expected state to be %d, got %d", expectedList[ind], temp.GetState())
 		}

@@ -13,4 +13,7 @@ BROKER_UPDATE_DIRECTORY = "/updateDirectory"
 SERVER_UPDATE_DIRECTORY = "/updateDirectory"
 SERVER_ADD_PACKAGE = "/addPackage"
 SERVER_REQUEST_PACKAGE = "/requestPackage"
+SERVER_READ_STORAGE = "/readPackageStorage"
+SERVER_IGNORE_BROKER = "/ignoreBroker"
+SERVER_BROKER_OK = "/brokerok"
 )

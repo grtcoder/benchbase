@@ -17,26 +17,29 @@ import (
 
 	"github.com/Workiva/go-datastructures/queue"
 	"github.com/gorilla/mux"
+	"github.com/avast/retry-go"
 )
 
 const (
 	DISPATCH_PERIOD = 5000
 	NUM_SERVERS     = 5
 	BUFFER_SIZE = 10000
+	RETRY_TIME=100*time.Millisecond
+
 )
 
 type Broker struct {
 	ID             int
 	IP             string
 	Port           int
-	TransactionQ   *queue.RingBuffer
+	TransactionQueue   *queue.RingBuffer
 	DirectoryAddr  string
 	DirectoryInfo  *commons.NodesMap
 	httpServer         *http.Server
 }
 
 func NewBroker(id int, ip string, port int, directoryIP string, directoryPort int) (*Broker, error) {
-	transactionQ := queue.NewRingBuffer(BUFFER_SIZE)
+	transactionQueue := queue.NewRingBuffer(BUFFER_SIZE)
 	directoryAddr := fmt.Sprintf("http://%s:%d", directoryIP, directoryPort)
 	directoryInfo := &commons.NodesMap{
 		ServerMap: &commons.DirectoryMap{Data: make(map[int]*commons.NodeInfo)},
@@ -47,7 +50,7 @@ func NewBroker(id int, ip string, port int, directoryIP string, directoryPort in
 		ID:            id,
 		IP:            ip,
 		Port:          port,
-		TransactionQ:  transactionQ,
+		TransactionQueue:  transactionQueue,
 		DirectoryAddr: directoryAddr,
 		DirectoryInfo: directoryInfo,
 	}
@@ -56,12 +59,12 @@ func NewBroker(id int, ip string, port int, directoryIP string, directoryPort in
 		return nil, fmt.Errorf("error registering broker: %v", err)
 	}
 
-	if err := broker.broadcastNodesInfo(); err != nil {
+	if err := commons.BroadcastNodesInfo(broker.ID,commons.BrokerType,broker.DirectoryInfo); err != nil {
 		return nil, fmt.Errorf("error broadcasting nodes info: %v", err)
 	}
 
 	r := mux.NewRouter()
-	r.HandleFunc(commons.BROKER_UPDATE_DIRECTORY, broker.handleUpdateDirectory).Methods("POST")
+	r.HandleFunc(commons.BROKER_UPDATE_DIRECTORY, commons.HandleUpdateDirectory(broker.DirectoryInfo)).Methods("POST")
 	r.HandleFunc(commons.BROKER_TRANSACTION, broker.handleTransactionRequest).Methods("POST")
 
 	broker.httpServer = &http.Server{
@@ -107,79 +110,6 @@ func (b *Broker) register() error {
 	return nil
 }
 
-func (b *Broker) broadcastNodesInfo() error {
-	var wg sync.WaitGroup
-
-	jsonData, err := json.Marshal(b.DirectoryInfo)
-	if err != nil {
-		return fmt.Errorf("error encoding JSON: %v", err)
-	}
-
-	for id, node := range b.DirectoryInfo.BrokerMap.Data {
-		if id == b.ID {
-			continue
-		}
-
-		wg.Add(1)
-		go func(id int, node *commons.NodeInfo) {
-			defer wg.Done()
-
-			resp, err := http.Post(fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, commons.BROKER_UPDATE_DIRECTORY), "application/json", bytes.NewBuffer(jsonData))
-			if err != nil {
-				log.Printf("Error sending request to server %d: %s", id, err)
-				return
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				log.Printf("Unexpected status code: %d for server %d", resp.StatusCode, id)
-			}
-		}(id, node)
-	}
-
-	for id, node := range b.DirectoryInfo.ServerMap.Data {
-		wg.Add(1)
-		go func(id int, node *commons.NodeInfo) {
-			defer wg.Done()
-
-			resp, err := http.Post(fmt.Sprintf("http://%s:%d%s", node.IP, node.Port,commons.SERVER_UPDATE_DIRECTORY), "application/json", bytes.NewBuffer(jsonData))
-			if err != nil {
-				log.Printf("Error sending request to server %d: %s", id, err)
-				return
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				log.Printf("Unexpected status code: %d for server %d", resp.StatusCode, id)
-			}
-		}(id, node)
-	}
-
-	wg.Wait()
-	log.Printf("Broadcast method complete.")
-	return nil
-}
-
-func (b *Broker) handleUpdateDirectory(w http.ResponseWriter, r *http.Request) {
-	// Read data from request
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Error reading request body", http.StatusBadRequest)
-		return
-	}
-	defer r.Body.Close()
-
-	// Process the data
-	newDirectoryMap := &commons.NodesMap{}
-	if err := json.Unmarshal(body, &newDirectoryMap); err != nil {
-		log.Printf("Error unmarshalling JSON: %s", err)
-		http.Error(w, "Error unmarshalling JSON", http.StatusBadRequest)
-		return
-	}
-
-	b.DirectoryInfo.CheckAndUpdateMap(newDirectoryMap)
-
-	w.WriteHeader(http.StatusOK)
-}
-
 func (b *Broker) handleTransactionRequest(w http.ResponseWriter, r *http.Request) {
 	// Read data from request
 	body, err := io.ReadAll(r.Body)
@@ -195,8 +125,22 @@ func (b *Broker) handleTransactionRequest(w http.ResponseWriter, r *http.Request
 
 	// Example: Print the data
 	log.Println("Received data:", transaction)
-	b.TransactionQ.Put(transaction)
+	b.TransactionQueue.Put(transaction)
 	w.WriteHeader(http.StatusOK)
+}
+
+func (b *Broker) sendPackage(serverURL string,jsonData []byte) func() error {
+	return func() error {
+		resp, err := http.Post(serverURL, "application/json", bytes.NewBuffer(jsonData))
+		if err != nil {
+			return fmt.Errorf("error sending request to %s: %s", serverURL, err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("unexpected status code: %d for server %s", resp.StatusCode, serverURL)
+		}
+		return nil
+	}
 }
 
 func (b *Broker) protocolDaemon() {
@@ -226,16 +170,15 @@ func (b *Broker) protocolDaemon() {
 					log.Printf("Server: %d, Error marshalling node info: %s", serverID, err)
 					return
 				}
-
-				resp, err := http.Post(fmt.Sprintf("http://%s:%d%s", node.IP, node.Port,commons.SERVER_ADD_PACKAGE), "application/json", bytes.NewBuffer(jsonData))
-				if err != nil {
-					log.Printf("Error sending request to server %d: %s", serverID, err)
-					return
-				}
-
-				if resp.StatusCode != http.StatusOK {
-					log.Printf("Unexpected status code: %d for server %d", resp.StatusCode, serverID)
-				}
+				retry.Do(
+					b.sendPackage(fmt.Sprintf("http://%s:%d%s", node.IP, node.Port,commons.SERVER_ADD_PACKAGE),jsonData),
+					retry.Attempts(5),               // Number of retry attempts
+					retry.Delay(RETRY_TIME),      // Delay between retries
+					retry.DelayType(retry.FixedDelay), // Use fixed delay strategy
+					retry.OnRetry(func(n uint, err error) {
+						log.Printf("Retry attempt %d: %v\n", n+1, err)
+					}),
+				)
 			}(serverID, node)
 		}
 
@@ -245,16 +188,16 @@ func (b *Broker) protocolDaemon() {
 
 func (b *Broker) CreatePackage(packageCounter int) *commons.Package {
 	var transactions []*commons.Transaction
-	packageSize := b.TransactionQ.Len()
+	packageSize := b.TransactionQueue.Len()
 
 	for packageSize > 0 {
-		if b.TransactionQ.Len() == 0 {
+		if b.TransactionQueue.Len() == 0 {
 			log.Printf("Transaction array is empty")
 			break
 		}
 
 		packageSize--
-		transaction, err := b.TransactionQ.Poll(2 * time.Second)
+		transaction, err := b.TransactionQueue.Poll(2 * time.Second)
 		if err != nil {
 			log.Printf("Error getting transaction from queue: %s", err)
 			continue
