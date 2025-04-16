@@ -1,13 +1,13 @@
 package commons
 
 import (
-	"net/http"
-	"io"
-	"encoding/json"
-	"log"
-	"sync"
-	"fmt"
 	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"sync"
 )
 
 type NodeInfo struct {
@@ -71,9 +71,8 @@ const (
 )
 
 type Package struct {
-	State int32 `json:"state"`
 	BrokerID int `json:"brokerID"`
-	PackageCounter int `json:"packageCounter"`
+	PackageID int `json:"packageID"`
 	Transactions []*Transaction `json:"transactions"`
 }
 
@@ -97,6 +96,7 @@ func (m *DirectoryMap) Set(key int, value *NodeInfo) {
 func HandleUpdateDirectory(directoryInfo *NodesMap) func(w http.ResponseWriter, r *http.Request) {
 	return func (w http.ResponseWriter, r *http.Request) {
 		// Read data from request
+		log.Printf("Received update directory request\n")
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "Error reading request body", http.StatusBadRequest)
@@ -171,3 +171,4 @@ func BroadcastNodesInfo(currNodeID int, currNodeType int32,directoryInfo *NodesM
 	log.Printf("Broadcast method complete.")
 	return nil
 }
+

@@ -10,7 +10,7 @@ go run services/broker/main.go -directoryIP=localhost -directoryPort 8080 -broke
 
 ## Server
 ```bash
-go run services/server/main.go -directoryIP=localhost -directoryPort 8081 -serverIP=localhost -serverPort 8082
+go run services/server/main.go -directoryIP=localhost -directoryPort 8080 -serverIP=localhost -serverPort 8082
 ```
 
 ## Directory

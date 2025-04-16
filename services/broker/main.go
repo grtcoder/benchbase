@@ -16,13 +16,12 @@ import (
 	"time"
 
 	"github.com/Workiva/go-datastructures/queue"
-	"github.com/gorilla/mux"
 	"github.com/avast/retry-go"
+	"github.com/gorilla/mux"
 )
 
 const (
 	DISPATCH_PERIOD = 5000
-	NUM_SERVERS     = 5
 	BUFFER_SIZE = 10000
 	RETRY_TIME=100*time.Millisecond
 
@@ -145,20 +144,21 @@ func (b *Broker) sendPackage(serverURL string,jsonData []byte) func() error {
 
 func (b *Broker) protocolDaemon() {
 	packageCounter := 0
+	log.Printf("Daemon routine is running...")
 
 	for {
-		log.Printf("Daemon routine is running...")
 		time.Sleep(DISPATCH_PERIOD * time.Millisecond)
 		packageCounter++
 		pkg := b.CreatePackage(packageCounter)
 
-		log.Printf("package of size %d created\n", len(pkg.Transactions))
+		log.Printf("package with transactions_count:%d created\n", len(pkg.Transactions))
 
 		jsonData, err := json.Marshal(pkg)
 		if err != nil {
 			log.Printf("Error marshalling package: %s", err)
 			continue
 		}
+		
 
 		var wg sync.WaitGroup
 		for serverID, node := range b.DirectoryInfo.ServerMap.Data {
@@ -170,6 +170,9 @@ func (b *Broker) protocolDaemon() {
 					log.Printf("Server: %d, Error marshalling node info: %s", serverID, err)
 					return
 				}
+
+				log.Printf("Sending package to server %d at %s:%d\n", serverID, node.IP, node.Port)
+
 				retry.Do(
 					b.sendPackage(fmt.Sprintf("http://%s:%d%s", node.IP, node.Port,commons.SERVER_ADD_PACKAGE),jsonData),
 					retry.Attempts(5),               // Number of retry attempts
@@ -188,15 +191,12 @@ func (b *Broker) protocolDaemon() {
 
 func (b *Broker) CreatePackage(packageCounter int) *commons.Package {
 	var transactions []*commons.Transaction
-	packageSize := b.TransactionQueue.Len()
-
-	for packageSize > 0 {
+	for b.TransactionQueue.Len()>0 {
 		if b.TransactionQueue.Len() == 0 {
 			log.Printf("Transaction array is empty")
 			break
 		}
 
-		packageSize--
 		transaction, err := b.TransactionQueue.Poll(2 * time.Second)
 		if err != nil {
 			log.Printf("Error getting transaction from queue: %s", err)
@@ -215,9 +215,9 @@ func (b *Broker) CreatePackage(packageCounter int) *commons.Package {
 	pkg := &commons.Package{
 		BrokerID:       b.ID,
 		Transactions:   transactions,
+		PackageID: 	 packageCounter,
 	}
 
-	packageCounter++
 	return pkg
 }
 
@@ -261,7 +261,9 @@ func main() {
 			fmt.Println("broker Error:", err)
 		}
 	}()
-	fmt.Println("broker running on http://localhost:8080")
+
+	// Print the broker's address
+	fmt.Printf("broker running on http://localhost:%d\n", broker.Port)
 
 	go func() {
 		broker.protocolDaemon()

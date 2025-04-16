@@ -36,3 +36,4 @@ build/
 env/
 CMakeFiles/
 CMakeCache.txt
+*.json

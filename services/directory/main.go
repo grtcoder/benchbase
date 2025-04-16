@@ -17,7 +17,7 @@ import (
 
 
 
-var deviceInfo *commons.NodesMap
+var nodesInfo *commons.NodesMap
 
 // This will also serve as the version of the broker information.
 var latestBrokerID int
@@ -29,13 +29,15 @@ func registerBroker(w http.ResponseWriter, r *http.Request) {
 	// Read the JSON body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		log.Printf("error while reading request body, error: %s",err)
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
 	defer r.Body.Close() // Close body after reading
 
-	brokerInfo := deviceInfo.BrokerMap
+	brokerInfo := nodesInfo.BrokerMap
 	brokerInfo.Lock()
+	latestBrokerID++
 	brokerID := latestBrokerID
 
 	currBroker:=&commons.NodeInfo{}
@@ -46,8 +48,7 @@ func registerBroker(w http.ResponseWriter, r *http.Request) {
 	}
 
 	brokerInfo.Set(brokerID, currBroker)
-	brokerInfo.SetVersion(latestBrokerID)
-	latestBrokerID++
+	brokerInfo.SetVersion(brokerID)
 
 	brokerInfo.Unlock()
 
@@ -55,7 +56,7 @@ func registerBroker(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(deviceInfo)
+	json.NewEncoder(w).Encode(nodesInfo)
 }
 
 func registerServer(w http.ResponseWriter, r *http.Request) {
@@ -68,8 +69,9 @@ func registerServer(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close() // Close body after reading
 
 
-	serverInfo := deviceInfo.ServerMap
+	serverInfo := nodesInfo.ServerMap
 	serverInfo.Lock()
+	latestServerID++
 	serverID := latestServerID
 
 	currServer:=&commons.NodeInfo{}
@@ -80,22 +82,23 @@ func registerServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	serverInfo.Set(serverID,currServer)
-	serverInfo.SetVersion(latestServerID)
-	latestServerID++
+	serverInfo.SetVersion(serverID)
 
 	serverInfo.Unlock()
 
-	log.Printf("%#v",serverInfo)
 	log.Printf("Server registered with ID: %d",serverID)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(deviceInfo)
+	json.NewEncoder(w).Encode(nodesInfo)
 }
 
 func main(){
+	// Initialize the broker and server counter to 0.
 	latestBrokerID = 0
-	deviceInfo = &commons.NodesMap{
+	latestServerID = 0
+
+	nodesInfo = &commons.NodesMap{
 		ServerMap: &commons.DirectoryMap{
 			Data: make(map[int]*commons.NodeInfo),
 			Version: 0,
@@ -122,7 +125,7 @@ func main(){
 			log.Println("Server Error:", err)
 		}
 	}()
-	log.Println("Server running on http://localhost:8081")
+	log.Println("Server running on http://localhost:8080")
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt)
