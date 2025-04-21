@@ -64,11 +64,15 @@ func (n *NodesMap) CheckAndUpdateMap(newDirectoryMap *NodesMap) {
 }
 
 
-type Transaction struct {
+type Operation struct {
 	Timestamp int64 `json:"timestamp"`
 	Key string `json:"key"`	
 	Value string `json:"value"`
 	Op int64 `json:"op"`
+}
+
+type Transaction struct {
+	Operations []*Operation `json:"operations"`
 }
 
 

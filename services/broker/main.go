@@ -212,19 +212,19 @@ func (b *Broker) CreatePackage(packageCounter int) *commons.Package {
 			break
 		}
 
-		transaction, err := b.TransactionQueue.Poll(2 * time.Second)
+		transactionIntf, err := b.TransactionQueue.Poll(2 * time.Second)
 		if err != nil {
 			log.Printf("Error getting transaction from queue: %s", err)
 			continue
 		}
 
-		transaction, ok := transaction.(*commons.Transaction)
+		transaction, ok := transactionIntf.(*commons.Transaction)
 		if !ok {
 			log.Printf("Error type assertion for transaction failed %T failed", transaction)
 			continue
 		}
 
-		transactions = append(transactions, transaction.(*commons.Transaction))
+		transactions = append(transactions, transaction)
 	}
 
 	pkg := &commons.Package{
