@@ -13,24 +13,22 @@ import (
 	"os/signal"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"encoding/json"
 
 	"github.com/Workiva/go-datastructures/queue"
 	"github.com/avast/retry-go"
 	"github.com/gorilla/mux"
-	"github.com/robfig/cron/v3"
 )
 
 const ( 
 	// Protocol time in seconds
-	PROTOCOL_TIME_PERIOD=5
 
 	BUFFER_SIZE=10000
 	WRITE_BUFFER_SIZE=100
-	WAIT_FOR_BROKER_TIMER=2*time.Second
-	RETRY_TIME=400*time.Millisecond
 )
 
 
@@ -54,9 +52,12 @@ type Server struct {
 	serverID int
 	writeChan chan *commons.Package
 	answer map[int]*commons.StateList
+
+	// TODO: Make this map a lock free map
+	ignoreBrokers map[int]*struct{}
+
 	packageArray *queue.RingBuffer
 }
-
 
 func (s *Server) requestPackage(serverURL string,brokerID int,pkg *commons.Package) func() error {
 	return func() error {
@@ -94,8 +95,8 @@ func (s *Server) requestPackage(serverURL string,brokerID int,pkg *commons.Packa
 func (s *Server) requestPackageWithRetry(serverURL string,brokerID int, pkg *commons.Package) error {
 	return retry.Do(
 		s.requestPackage(serverURL,brokerID,pkg),
-		retry.Attempts(5),               // Number of retry attempts
-		retry.Delay(RETRY_TIME),      // Delay between retries
+		retry.Attempts(commons.SERVER_RETRY), // Number of retry attempts
+		retry.Delay(commons.SERVER_REQUEST_TIMEOUT), // Delay between retries
 		retry.DelayType(retry.FixedDelay), // Use fixed delay strategy
 		retry.OnRetry(func(n uint, err error) {
 			log.Printf("serverURL: %s, brokerID:%d, Retry attempt %d: %v\n",serverURL,brokerID, n+1, err)
@@ -127,6 +128,11 @@ func (s *Server) updateNotReceivedPackage() {
 func (s *Server) getBrokerList(state int32) []int {
 	var brokerList []int
 	for brokerID,stateList := range s.answer {
+		if _,ok := s.ignoreBrokers[brokerID]; ok {
+			// Ignore the broker if it is in the ignore list
+			continue
+		}
+
 		currHead := stateList.GetHead()
 		if currHead.GetState()==state {
 			brokerList = append(brokerList, brokerID)
@@ -209,7 +215,7 @@ func (s *Server) handleAddPackage(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		if currHead.GetState()==commons.IgnoreBroker {
+		if _,ok := s.ignoreBrokers[pkg.BrokerID]; !ok {
 			log.Printf("Dropping package for brokerID: %d, since IgnoreBroker state is set",pkg.BrokerID)
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -267,7 +273,11 @@ func (s *Server) handleIgnoreBroker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if ok:=s.answer[brokerIDInt].UpdateState(nil,commons.NewStateNode(&commons.StateValue{State: commons.IgnoreBroker,Pkg: nil})); !ok {
+	currHead := s.answer[brokerIDInt].GetHead()
+
+	atomic.CompareAndSwapPointer((*unsafe.Pointer)(unsafe.Pointer(s.ignoreBrokers[brokerIDInt])), nil, (unsafe.Pointer(&struct{}{})))
+
+	if ok:=s.answer[brokerIDInt].UpdateState(currHead,commons.NewStateNode(&commons.StateValue{State: commons.IgnoreBroker,Pkg: nil})); !ok {
 		log.Printf("error updating state for brokerID: %d to ignoreBroker", brokerIDInt)
 		http.Error(w, "Error updating state", http.StatusBadRequest)
 		return
@@ -309,7 +319,6 @@ func (s *Server) handleBrokerOk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmt.Printf("Package: %#v\n",pkg)
-
 
 	if ok:=s.answer[pkg.BrokerID].UpdateState(currHead,commons.NewStateNode(&commons.StateValue{State: commons.Received,Pkg: pkg})); ok {
 		s.packageArray.Put(pkg)
@@ -456,8 +465,8 @@ func (s *Server) sendIgnoreBroker(serverURL string) func() error{
 func (s *Server) sendIgnoreBrokerWithRetry(serverURL string) error {
 	return retry.Do(
 		s.sendIgnoreBroker(serverURL),
-		retry.Attempts(5),               // Number of retry attempts
-		retry.Delay(RETRY_TIME),      // Delay between retries
+		retry.Attempts(commons.SERVER_RETRY),               // Number of retry attempts
+		retry.Delay(commons.SERVER_REQUEST_TIMEOUT),      // Delay between retries
 		retry.DelayType(retry.FixedDelay), // Use fixed delay strategy
 		retry.OnRetry(func(n uint, err error) {
 			log.Printf("Retry attempt %d: %v\n", n+1, err)
@@ -492,39 +501,60 @@ func (s *Server) sendIgnoreBrokerRequests(brokerList []int) {
 }
 
 
-func (s *Server) protocolDaemon() {
+func (s *Server) protocolDaemon(nextRun time.Time) {
 	// Daemon routine
 		// Setup the answerMap for fresh epoch.
-		s.setupAnswerMap()
-		go func()  {
+			// We want the ticker to have millisecond precision
+		ticker := time.NewTicker(time.Millisecond)
+
+		for tc := range ticker.C {
+			if tc.Before(nextRun) {
+				continue
+			}
+			waitPackage := nextRun.Add(commons.WAIT_FOR_BROKER_PACKAGE)
+			nextRun = nextRun.Add(commons.EPOCH_PERIOD)
+
+			s.setupAnswerMap()
 			err:=commons.BroadcastNodesInfo(s.serverID,commons.ServerType,s.DirectoryInfo)
 			if err!=nil {
 				log.Printf("error while broadcasting directory info: %s",err)
 			}
-		}()
-		log.Println("Answer map is setup, waiting for packages...")
-		// Wait for Brokers to send packages.
-		time.Sleep(WAIT_FOR_BROKER_TIMER)
-		log.Println("Time is up, checking for received packages...")
 
-		s.updateNotReceivedPackage()
+			log.Println("Answer map is setup, waiting for packages...")
+			// Wait for Brokers to send packages.
+		// We do this instead of time.After because we don't know how long the Broadcast Nodes Info will take.
+			for innerTc := range ticker.C {
+				if innerTc.Equal(waitPackage) || innerTc.After(waitPackage) {
+					break
+				}
+			}			
+			log.Println("Time is up, checking for received packages...")
 
-		brokerList:= s.getBrokerList(commons.NotReceived)
-		log.Printf("Missing packages: %#v\n",brokerList)
-		s.requestPackages(commons.SERVER_REQUEST_PACKAGE,brokerList)
+			s.updateNotReceivedPackage()
 
-		// Request package from the memory of other servers.
-		// Get the list of brokers for which we have still not received the package.
-		brokerList= s.getBrokerList(commons.NotReceived)
-		log.Printf("Still missing packages: %#v\n",brokerList)
+			brokerList:= s.getBrokerList(commons.NotReceived)
+			log.Printf("Missing packages: %#v\n",brokerList)
+			s.requestPackages(commons.SERVER_REQUEST_PACKAGE,brokerList)
 
-		s.requestPackages(commons.SERVER_READ_STORAGE,brokerList)
+			// Request package from the memory of other servers.
+			// Get the list of brokers for which we have still not received the package.
+			brokerList= s.getBrokerList(commons.NotReceived)
+			log.Printf("Still missing packages: %#v\n",brokerList)
 
-		brokerList= s.getBrokerList(commons.NotReceived)
+			s.requestPackages(commons.SERVER_READ_STORAGE,brokerList)
 
-		// Send ignore broker requests to other servers.
-		s.sendIgnoreBrokerRequests(brokerList)
-		fmt.Println("Protocol Completed....")	
+			brokerList= s.getBrokerList(commons.NotReceived)
+
+			for _,brokerID := range brokerList {
+				if _,ok:=s.ignoreBrokers[brokerID]; !ok {
+					atomic.CompareAndSwapPointer((*unsafe.Pointer)(unsafe.Pointer(s.ignoreBrokers[brokerID])), nil, (unsafe.Pointer(&struct{}{})))
+				}
+			}
+		
+			// Send ignore broker requests to other servers.
+			s.sendIgnoreBrokerRequests(brokerList)
+			fmt.Println("Protocol Completed....")	
+	}
 }
 
 
@@ -542,6 +572,9 @@ func main() {
 	flag.StringVar(&serverIP, "serverIP", "", "IP of current Server")
 	flag.IntVar(&serverPort, "serverPort", 0, "Port of Server")
 
+	var startTimestamp int64
+	flag.Int64Var(&startTimestamp, "startTimestamp", 0, "Start timestamp")
+
 	flag.Parse()
 
 	if directoryIP == "" {
@@ -555,6 +588,9 @@ func main() {
 	}
 	if serverPort == 0 {
 		log.Fatalf("serverPort is required")
+	}
+	if startTimestamp == 0 {
+		log.Fatalf("startTimestamp is required")
 	}
 
 	server := &Server{
@@ -584,9 +620,10 @@ func main() {
 
 	fmt.Printf("Server running on http://localhost:%d\n",server.port)
 
-	c := cron.New(cron.WithSeconds())
-	c.AddFunc(fmt.Sprintf("*/%d * * * * *",PROTOCOL_TIME_PERIOD), server.protocolDaemon)
-	c.Start()
+	go func() {
+		server.protocolDaemon(time.Unix(0, startTimestamp))
+		defer fmt.Println("Daemon routine stopped.")
+	}()
 
 
 	
@@ -603,6 +640,5 @@ func main() {
 
 	httpServer.Shutdown(ctx)
 	fmt.Println("Server stopped.")
-	c.Stop()
 	close(server.writeChan)
 }

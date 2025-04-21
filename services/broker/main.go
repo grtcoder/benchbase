@@ -21,10 +21,7 @@ import (
 )
 
 const (
-	DISPATCH_PERIOD = 5000
 	BUFFER_SIZE = 10000
-	RETRY_TIME=100*time.Millisecond
-
 )
 
 type Broker struct {
@@ -142,12 +139,30 @@ func (b *Broker) sendPackage(serverURL string,jsonData []byte) func() error {
 	}
 }
 
-func (b *Broker) protocolDaemon() {
+func (b *Broker) protocolDaemon(nextRun time.Time) {
 	packageCounter := 0
 	log.Printf("Daemon routine is running...")
 
-	for {
-		time.Sleep(DISPATCH_PERIOD * time.Millisecond)
+	// We want the ticker to have millisecond precision
+	ticker := time.NewTicker(time.Millisecond)
+
+	for tc := range ticker.C {
+		if tc.Before(nextRun) {
+			continue
+		}
+		endWait := nextRun.Add(commons.WAIT_FOR_TRANSACTIONS)
+		nextRun = nextRun.Add(commons.EPOCH_PERIOD)
+	
+		if err := commons.BroadcastNodesInfo(b.ID,commons.BrokerType,b.DirectoryInfo); err != nil {
+			log.Printf("Error broadcasting nodes info: %s", err)
+		}
+
+		// We do this instead of time.After because we don't know how long the Broadcast Nodes Info will take.
+		for innerTc := range ticker.C {
+			if innerTc.Equal(endWait) || innerTc.After(endWait) {
+				break
+			}
+		}
 		packageCounter++
 		pkg := b.CreatePackage(packageCounter)
 
@@ -175,8 +190,8 @@ func (b *Broker) protocolDaemon() {
 
 				retry.Do(
 					b.sendPackage(fmt.Sprintf("http://%s:%d%s", node.IP, node.Port,commons.SERVER_ADD_PACKAGE),jsonData),
-					retry.Attempts(5),               // Number of retry attempts
-					retry.Delay(RETRY_TIME),      // Delay between retries
+					retry.Attempts(commons.BROKER_RETRY),               // Number of retry attempts
+					retry.Delay(commons.BROKER_REQUEST_TIMEOUT),      // Delay between retries
 					retry.DelayType(retry.FixedDelay), // Use fixed delay strategy
 					retry.OnRetry(func(n uint, err error) {
 						log.Printf("Retry attempt %d: %v\n", n+1, err)
@@ -235,6 +250,9 @@ func main() {
 	flag.StringVar(&brokerIP, "brokerIP", "", "IP of current broker")
 	flag.IntVar(&brokerPort, "brokerPort", 0, "Port of broker")
 
+	var startTimestamp int64
+	flag.Int64Var(&startTimestamp, "startTimestamp", 0, "Start timestamp")
+
 	flag.Parse()
 
 	if directoryIP == "" {
@@ -248,6 +266,9 @@ func main() {
 	}
 	if brokerPort == 0 {
 		log.Fatalf("brokerPort is required")
+	}
+	if startTimestamp == 0 {
+		log.Fatalf("startTimestamp is required")
 	}
 
 	broker, err := NewBroker(0, brokerIP, brokerPort, directoryIP, directoryPort)
@@ -266,7 +287,7 @@ func main() {
 	fmt.Printf("broker running on http://localhost:%d\n", broker.Port)
 
 	go func() {
-		broker.protocolDaemon()
+		broker.protocolDaemon(time.Unix(0, startTimestamp))
 		defer fmt.Println("Daemon routine stopped.")
 	}()
 	quit := make(chan os.Signal, 1)

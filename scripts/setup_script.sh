@@ -1,5 +1,6 @@
 sudo apt update
 sudo apt install crony
+sudo apt install git
 
 # Setup and install go
 wget https://go.dev/dl/go1.22.0.linux-amd64.tar.gz
@@ -12,7 +13,3 @@ source ~/.bashrc
 
 git clone https://github.com/grtcoder/lock-free-machine.git
 cd lock-free-machine
-
-go build -o broker ./services/broker/
-go build -o server ./services/server/
-go build -o directory ./services/directory/

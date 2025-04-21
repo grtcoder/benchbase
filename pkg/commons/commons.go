@@ -8,6 +8,21 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
+)
+
+const (
+	BROADCAST_TIMEOUT=100*time.Millisecond
+
+	EPOCH_PERIOD=5000 * time.Millisecond
+
+	// We wait for 60% of the time for transactions. The rest of the transactions will be in the next package.
+	WAIT_FOR_TRANSACTIONS=(60*EPOCH_PERIOD)/100
+	WAIT_FOR_BROKER_PACKAGE=1000*time.Second
+	BROKER_REQUEST_TIMEOUT=100*time.Millisecond
+	SERVER_REQUEST_TIMEOUT=100*time.Millisecond
+	BROKER_RETRY=5
+	SERVER_RETRY=5
 )
 
 type NodeInfo struct {
@@ -51,8 +66,9 @@ func (n *NodesMap) CheckAndUpdateMap(newDirectoryMap *NodesMap) {
 
 type Transaction struct {
 	Timestamp int64 `json:"timestamp"`
-	Key string `json:"key"`
+	Key string `json:"key"`	
 	Value string `json:"value"`
+	Op int64 `json:"op"`
 }
 
 
@@ -125,6 +141,9 @@ func BroadcastNodesInfo(currNodeID int, currNodeType int32,directoryInfo *NodesM
 	if err != nil {
 		return fmt.Errorf("error encoding JSON: %v", err)
 	}
+	client := &http.Client{
+        Timeout: BROADCAST_TIMEOUT,
+    }
 
 	for id, node := range directoryInfo.BrokerMap.Data {
 		if id == currNodeID && currNodeType == BrokerType {
@@ -135,7 +154,7 @@ func BroadcastNodesInfo(currNodeID int, currNodeType int32,directoryInfo *NodesM
 		go func(id int, node *NodeInfo) {
 			defer wg.Done()
 
-			resp, err := http.Post(fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, BROKER_UPDATE_DIRECTORY), "application/json", bytes.NewBuffer(jsonData))
+			resp, err := client.Post(fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, BROKER_UPDATE_DIRECTORY), "application/json", bytes.NewBuffer(jsonData))
 			if err != nil {
 				log.Printf("Error sending request to server %d: %s", id, err)
 				return
@@ -155,7 +174,7 @@ func BroadcastNodesInfo(currNodeID int, currNodeType int32,directoryInfo *NodesM
 		go func(id int, node *NodeInfo) {
 			defer wg.Done()
 
-			resp, err := http.Post(fmt.Sprintf("http://%s:%d%s", node.IP, node.Port,SERVER_UPDATE_DIRECTORY), "application/json", bytes.NewBuffer(jsonData))
+			resp, err := client.Post(fmt.Sprintf("http://%s:%d%s", node.IP, node.Port,SERVER_UPDATE_DIRECTORY), "application/json", bytes.NewBuffer(jsonData))
 			if err != nil {
 				log.Printf("Error sending request to server %d: %s", id, err)
 				return
