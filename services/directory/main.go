@@ -110,8 +110,8 @@ func main(){
 	}
 
 	r := mux.NewRouter()
-	r.HandleFunc(commons.DIRECTORY_REGISTER_BROKER, registerBroker).Methods("POST")
-	r.HandleFunc(commons.DIRECTORY_REGISTER_SERVER, registerServer).Methods("POST")
+	r.HandleFunc(commons.DIRECTORY_REGISTER_BROKER, registerBroker)
+	r.HandleFunc(commons.DIRECTORY_REGISTER_SERVER, registerServer)
 
 	// Graceful shutdown handling
 	server := &http.Server{

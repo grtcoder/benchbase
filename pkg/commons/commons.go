@@ -18,7 +18,7 @@ const (
 
 	// We wait for 60% of the time for transactions. The rest of the transactions will be in the next package.
 	WAIT_FOR_TRANSACTIONS=(60*EPOCH_PERIOD)/100
-	WAIT_FOR_BROKER_PACKAGE=1000*time.Second
+	WAIT_FOR_BROKER_PACKAGE=1000*time.Millisecond
 	BROKER_REQUEST_TIMEOUT=100*time.Millisecond
 	SERVER_REQUEST_TIMEOUT=100*time.Millisecond
 	BROKER_RETRY=5
@@ -154,6 +154,8 @@ func BroadcastNodesInfo(currNodeID int, currNodeType int32,directoryInfo *NodesM
 			continue
 		}
 
+		log.Printf("Sending broadcast request to broker %d: %s:%d", id, node.IP, node.Port)
+
 		wg.Add(1)
 		go func(id int, node *NodeInfo) {
 			defer wg.Done()
@@ -174,6 +176,9 @@ func BroadcastNodesInfo(currNodeID int, currNodeType int32,directoryInfo *NodesM
 		if id == currNodeID && currNodeType == ServerType {
 			continue
 		}
+
+		log.Printf("Sending broadcast request to server %d: %s:%d", id, node.IP, node.Port)
+
 		wg.Add(1)
 		go func(id int, node *NodeInfo) {
 			defer wg.Done()

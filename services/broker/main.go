@@ -127,7 +127,12 @@ func (b *Broker) handleTransactionRequest(w http.ResponseWriter, r *http.Request
 
 func (b *Broker) sendPackage(serverURL string,jsonData []byte) func() error {
 	return func() error {
-		resp, err := http.Post(serverURL, "application/json", bytes.NewBuffer(jsonData))
+		// Create an HTTP client with a per-request timeout
+		client := &http.Client{
+			Timeout: commons.BROKER_REQUEST_TIMEOUT,
+		}
+
+		resp, err := client.Post(serverURL, "application/json", bytes.NewBuffer(jsonData))
 		if err != nil {
 			return fmt.Errorf("error sending request to %s: %s", serverURL, err)
 		}
@@ -145,13 +150,16 @@ func (b *Broker) protocolDaemon(nextRun time.Time) {
 
 	// We want the ticker to have millisecond precision
 	ticker := time.NewTicker(time.Millisecond)
+	log.Printf("Next run will happpen at: %s\n",nextRun)
 
 	for tc := range ticker.C {
 		if tc.Before(nextRun) {
 			continue
 		}
-		endWait := nextRun.Add(commons.WAIT_FOR_TRANSACTIONS)
+		endWait := nextRun.Add(commons.WAIT_FOR_BROKER_PACKAGE)
 		nextRun = nextRun.Add(commons.EPOCH_PERIOD)
+		log.Printf("Next run will happpen at: %s\n",nextRun)
+
 	
 		if err := commons.BroadcastNodesInfo(b.ID,commons.BrokerType,b.DirectoryInfo); err != nil {
 			log.Printf("Error broadcasting nodes info: %s", err)

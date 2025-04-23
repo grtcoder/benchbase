@@ -7,31 +7,35 @@ rm server
 
 read -p "Enter number of servers: " numServer
 read -p "Enter number of brokers: " numBroker
+read -p "Enter experiment name: " experimentName
 
 for ((i=1; i<=numBroker; i++)); do
-    broker_url="dmm6096@broker${i}.alpha-test.l-free-machine.emulab.net"
+    broker_url="dmm6096@broker${i}.${experimentName}.l-free-machine.emulab.net"
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${broker_url} << EOF
         # Commands to execute on the broker
         cd /users/dmm6096
         sudo pkill -f broker
+        rm -f broker output.log
         exit
 EOF
 done
 
 for ((i=1; i<=numServer; i++)); do
-    server_url="dmm6096@server${i}.alpha-test.l-free-machine.emulab.net"
+    server_url="dmm6096@server${i}.${experimentName}.l-free-machine.emulab.net"
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${server_url} << EOF
         # Commands to execute on the broker
         cd /users/dmm6096
         sudo pkill -f server
+        rm -f server output.log
         exit
 EOF
 done
 
-directory_url="dmm6096@directory.alpha-test.l-free-machine.emulab.net"
+directory_url="dmm6096@directory.${experimentName}.l-free-machine.emulab.net"
 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${directory_url} << EOF
         # Commands to execute on the broker
         cd /users/dmm6096
         sudo pkill -f directory
+        rm -f directory output.log
         exit
 EOF

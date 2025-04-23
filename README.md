@@ -17,3 +17,19 @@ go run services/server/main.go -directoryIP=localhost -directoryPort 8080 -serve
 ```bash
 go run services/directory/main.go
 ```
+
+
+## Test case commands
+
+```bash
+sudo ufw deny from <IP>
+```
+
+## Commands to block incoming packets via ufw
+
+```bash
+sudo ufw deny from <IP>
+sudo ufw allow from any
+sudo ufw enable
+```
+

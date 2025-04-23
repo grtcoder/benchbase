@@ -13,9 +13,7 @@ import (
 	"os/signal"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"encoding/json"
 
@@ -55,13 +53,17 @@ type Server struct {
 
 	// TODO: Make this map a lock free map
 	ignoreBrokers map[int]*struct{}
+	mtx sync.RWMutex
 
 	packageArray *queue.RingBuffer
 }
 
 func (s *Server) requestPackage(serverURL string,brokerID int,pkg *commons.Package) func() error {
 	return func() error {
-		resp, err := http.Get(fmt.Sprintf("%s?brokerID=%d",serverURL,brokerID))
+		client := &http.Client{
+			Timeout: commons.SERVER_REQUEST_TIMEOUT,
+		}
+		resp, err := client.Get(fmt.Sprintf("%s?brokerID=%d",serverURL,brokerID))
 		if err != nil {
 			log.Printf("error sending request to get package: %s", err)
 			return fmt.Errorf("error sending request to get package: %s", err)
@@ -128,6 +130,8 @@ func (s *Server) updateNotReceivedPackage() {
 func (s *Server) getBrokerList(state int32) []int {
 	var brokerList []int
 	for brokerID,stateList := range s.answer {
+		s.mtx.RLock()
+		defer s.mtx.RUnlock()
 		if _,ok := s.ignoreBrokers[brokerID]; ok {
 			// Ignore the broker if it is in the ignore list
 			continue
@@ -174,7 +178,7 @@ func (s *Server) writePackage(pkg *commons.Package) error {
 		return fmt.Errorf("error writing to file: %s", err)
 	}
 
-	log.Println("Package written to file")
+	log.Printf("Package (brokerID:%d, packageID:%d) written to file\n",pkg.BrokerID,pkg.PackageID)
 	return nil
 }
 
@@ -215,7 +219,9 @@ func (s *Server) handleAddPackage(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		if _,ok := s.ignoreBrokers[pkg.BrokerID]; !ok {
+		s.mtx.RLock()
+		defer s.mtx.RUnlock()
+		if _,ok := s.ignoreBrokers[pkg.BrokerID]; ok {
 			log.Printf("Dropping package for brokerID: %d, since IgnoreBroker state is set",pkg.BrokerID)
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -275,7 +281,8 @@ func (s *Server) handleIgnoreBroker(w http.ResponseWriter, r *http.Request) {
 
 	currHead := s.answer[brokerIDInt].GetHead()
 
-	atomic.CompareAndSwapPointer((*unsafe.Pointer)(unsafe.Pointer(s.ignoreBrokers[brokerIDInt])), nil, (unsafe.Pointer(&struct{}{})))
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
 
 	if ok:=s.answer[brokerIDInt].UpdateState(currHead,commons.NewStateNode(&commons.StateValue{State: commons.IgnoreBroker,Pkg: nil})); !ok {
 		log.Printf("error updating state for brokerID: %d to ignoreBroker", brokerIDInt)
@@ -300,7 +307,10 @@ func (s *Server) handleBrokerOk(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	if currHead.GetState()==commons.Undefined {
+
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+	if _,ok := s.ignoreBrokers[brokerIDInt]; ok {
 		log.Printf("Dropping package for brokerID: %d, since IgnoreBroker state is set",currHead.GetState())
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -385,7 +395,7 @@ func (s *Server) setupServer() (*http.Server,error) {
 		return nil,fmt.Errorf("error encoding JSON: %v", err)
 	}
 
-	resp,err := http.Post(fmt.Sprintf("%s/registerServer",s.directoryAddr), "application/json", bytes.NewBuffer(jsonData))
+	resp,err := http.Post(fmt.Sprintf("%s%s",s.directoryAddr,commons.DIRECTORY_REGISTER_SERVER), "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil,fmt.Errorf("error sending request to directory: %v, could not start server", err)
 	}
@@ -404,7 +414,6 @@ func (s *Server) setupServer() (*http.Server,error) {
 		return nil,fmt.Errorf("error unmarshalling JSON: %v", err)
 	}
 	fmt.Printf("DevicesInfo: %#v\n",s.DirectoryInfo.ServerMap.Data)
-
 
 	// Since we locking the directory service, we can safely assume that the version is the same as the serverID
 	s.serverID = s.DirectoryInfo.ServerMap.Version
@@ -454,7 +463,10 @@ func (s *Server) requestPackages(endpoint string,brokerList []int) {
 
 func (s *Server) sendIgnoreBroker(serverURL string) func() error{
 	return func() error {
-			resp, err := http.Post(serverURL, "application/json", nil)
+			client := &http.Client{
+				Timeout: commons.SERVER_REQUEST_TIMEOUT,
+			}
+			resp, err := client.Post(serverURL, "application/json", nil)
 			if err != nil {
 				return fmt.Errorf("error sending request to server %s: %s", serverURL, err)
 			}
@@ -506,6 +518,7 @@ func (s *Server) protocolDaemon(nextRun time.Time) {
 		// Setup the answerMap for fresh epoch.
 			// We want the ticker to have millisecond precision
 		ticker := time.NewTicker(time.Millisecond)
+		log.Printf("Next run will happen at: %s\n",nextRun)
 
 		for tc := range ticker.C {
 			if tc.Before(nextRun) {
@@ -513,6 +526,7 @@ func (s *Server) protocolDaemon(nextRun time.Time) {
 			}
 			waitPackage := nextRun.Add(commons.WAIT_FOR_BROKER_PACKAGE)
 			nextRun = nextRun.Add(commons.EPOCH_PERIOD)
+			log.Printf("Next run will happen at: %s\n",nextRun)
 
 			s.setupAnswerMap()
 			err:=commons.BroadcastNodesInfo(s.serverID,commons.ServerType,s.DirectoryInfo)
@@ -527,7 +541,7 @@ func (s *Server) protocolDaemon(nextRun time.Time) {
 				if innerTc.Equal(waitPackage) || innerTc.After(waitPackage) {
 					break
 				}
-			}			
+			}		
 			log.Println("Time is up, checking for received packages...")
 
 			s.updateNotReceivedPackage()
@@ -546,8 +560,10 @@ func (s *Server) protocolDaemon(nextRun time.Time) {
 			brokerList= s.getBrokerList(commons.NotReceived)
 
 			for _,brokerID := range brokerList {
+				s.mtx.Lock()
+				defer s.mtx.Unlock()
 				if _,ok:=s.ignoreBrokers[brokerID]; !ok {
-					atomic.CompareAndSwapPointer((*unsafe.Pointer)(unsafe.Pointer(s.ignoreBrokers[brokerID])), nil, (unsafe.Pointer(&struct{}{})))
+					s.ignoreBrokers[brokerID]=&struct{}{}
 				}
 			}
 		
@@ -599,6 +615,7 @@ func main() {
 		directoryAddr: fmt.Sprintf("http://%s:%d", directoryIP, directoryPort),
 		DirectoryInfo: &commons.NodesMap{},
 		answer: make(map[int]*commons.StateList),
+		ignoreBrokers: make(map[int]*struct{}),
 		packageArray: queue.NewRingBuffer(BUFFER_SIZE),
 		writeChan: make(chan *commons.Package, WRITE_BUFFER_SIZE),
 	}
@@ -624,8 +641,6 @@ func main() {
 		server.protocolDaemon(time.Unix(0, startTimestamp))
 		defer fmt.Println("Daemon routine stopped.")
 	}()
-
-
 	
 	var wg sync.WaitGroup
 	wg.Add(1)

@@ -37,3 +37,7 @@ env/
 CMakeFiles/
 CMakeCache.txt
 *.json
+
+scripts/broker
+scripts/directory
+scripts/server
