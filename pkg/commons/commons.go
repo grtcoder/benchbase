@@ -68,10 +68,11 @@ type Operation struct {
 	Timestamp int64 `json:"timestamp"`
 	Key string `json:"key"`	
 	Value string `json:"value"`
-	Op int64 `json:"op"`
+	Op int64 `json:"op"` // Operation type: 1 (Write), 2 (Delete), 3 (Read)
 }
 
 type Transaction struct {
+	Id int64 `json:"id"`
 	Operations []*Operation `json:"operations"`
 }
 
