@@ -1,0 +1,39 @@
+killall broker
+killall server
+killall directory
+
+go build -o broker.new ../services/broker/
+mv broker.new broker
+
+go build -o directory.new ../services/directory/
+mv directory.new directory
+
+go build -o server.new ../services/server/
+mv server.new server
+
+read -p "Enter number of servers: " numServer
+read -p "Enter number of brokers: " numBroker
+read -p "After how long do you want to start ( in seconds )?: " startTime
+# Calculate 1 minute later
+
+currTimestamp=$(python3 -c "import time; print(time.time_ns())")
+scheduleTimestamp=$((currTimestamp + ${startTime}*1000000000))
+echo "Schedule Timestamp: $scheduleTimestamp, current Timestamp: $currTimestamp"
+
+./directory > output.log 2>&1 &
+
+sleep 2
+
+for ((i=1; i<=numServer; i++)); do
+        # Commands to execute on the broker
+        ./server -directoryIP=localhost -directoryPort 8080 -serverIP=localhost -serverPort $((9080+${i})) -startTimestamp ${scheduleTimestamp} > output_server${i}.log 2>&1 &
+done
+
+# Loop over brokers and send multi-line SSH commands
+for ((i=1; i<=numBroker; i++)); do
+        # Commands to execute on the broker
+        ./broker -test -directoryIP=localhost -directoryPort 8080 -brokerIP=localhost -brokerPort $((8080+${i})) -startTimestamp ${scheduleTimestamp} > output_broker${i}.log 2>&1 &
+done
+
+disown
+

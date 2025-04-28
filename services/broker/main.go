@@ -18,7 +18,68 @@ import (
 	"github.com/Workiva/go-datastructures/queue"
 	"github.com/avast/retry-go"
 	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus"
+    "github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.uber.org/zap"
+    "go.uber.org/zap/zapcore"
+    "gopkg.in/natefinch/lumberjack.v2"
 )
+
+var logger *zap.Logger
+
+var ( 
+	httpRequests *prometheus.CounterVec
+	requestDuration *prometheus.HistogramVec
+	apiCallDuration *prometheus.HistogramVec
+	setupTime *prometheus.GaugeVec
+)
+
+func initMetrics(brokerID int) {
+	 // Create a wrapped Registerer that injects labels
+	wrappedRegisterer := prometheus.WrapRegistererWith(
+			prometheus.Labels{"brokerID": fmt.Sprint(brokerID)}, // <- static label here
+			prometheus.DefaultRegisterer,
+	)
+
+	httpRequests = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_total",
+			Help: "Count of all HTTP requests grouped by endpoint",
+		},
+		[]string{"path", "method"},
+	)
+
+	requestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "api_request_duration_milliseconds",
+			Help:    "Duration of API requests in milliseconds",
+			Buckets: prometheus.DefBuckets, // You can customize this
+		},
+		[]string{"path", "method","srcID","srcType"}, // group by endpoint/method if you want
+	)
+
+	apiCallDuration = prometheus.NewHistogramVec(
+        prometheus.HistogramOpts{
+            Name:    "outbound_api_call_duration_seconds",
+            Help:    "Duration of outbound API calls in seconds",
+            Buckets: prometheus.DefBuckets,
+        },
+        []string{ "method","targetID"},
+    )
+
+	setupTime = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "setup_time",
+			Help: "Time taken to set up the broker",
+		},
+		[]string{},
+	)
+	
+    wrappedRegisterer.MustRegister(httpRequests)
+	wrappedRegisterer.MustRegister(requestDuration)
+	wrappedRegisterer.MustRegister(apiCallDuration)
+	wrappedRegisterer.MustRegister(setupTime)
+}
 
 const (
 	BUFFER_SIZE = 10000
@@ -32,9 +93,31 @@ type Broker struct {
 	DirectoryAddr  string
 	DirectoryInfo  *commons.NodesMap
 	httpServer         *http.Server
+	isTest bool
+}
+// Middleware to measure duration with dynamic labels
+func MetricsMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        nodeID := r.Header.Get("X-NodeID") // Grab dynamic tenant ID from headers
+		nodeType := r.Header.Get("X-NodeType") // Grab dynamic tenant ID from headers
+        if nodeID == "" {
+            nodeID = "unknown"
+			nodeType = "unknown"
+        }
+
+        start := time.Now()
+
+        // Serve the real handler
+        next.ServeHTTP(w, r)
+
+        duration := time.Since(start).Seconds()
+
+        // Record with dynamic label
+        requestDuration.WithLabelValues(r.URL.Path, r.Method, nodeID,nodeType).Observe(duration)
+    })
 }
 
-func NewBroker(id int, ip string, port int, directoryIP string, directoryPort int) (*Broker, error) {
+func NewBroker(id int, ip string, port int, directoryIP string, directoryPort int,isTest bool) (*Broker, error) {
 	transactionQueue := queue.NewRingBuffer(BUFFER_SIZE)
 	directoryAddr := fmt.Sprintf("http://%s:%d", directoryIP, directoryPort)
 	directoryInfo := &commons.NodesMap{
@@ -49,6 +132,7 @@ func NewBroker(id int, ip string, port int, directoryIP string, directoryPort in
 		TransactionQueue:  transactionQueue,
 		DirectoryAddr: directoryAddr,
 		DirectoryInfo: directoryInfo,
+		isTest: isTest,
 	}
 
 	if err := broker.register(); err != nil {
@@ -60,8 +144,14 @@ func NewBroker(id int, ip string, port int, directoryIP string, directoryPort in
 	}
 
 	r := mux.NewRouter()
+	r.Use(MetricsMiddleware)
+
 	r.HandleFunc(commons.BROKER_UPDATE_DIRECTORY, commons.HandleUpdateDirectory(broker.DirectoryInfo)).Methods("POST")
 	r.HandleFunc(commons.BROKER_TRANSACTION, broker.handleTransactionRequest).Methods("POST")
+
+	// Prometheus metrics
+	initMetrics(id)
+	r.Path("/metrics").Handler(promhttp.Handler())
 
 	broker.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", broker.Port),
@@ -132,13 +222,30 @@ func (b *Broker) sendPackage(serverURL string,jsonData []byte) func() error {
 			Timeout: commons.BROKER_REQUEST_TIMEOUT,
 		}
 
-		resp, err := client.Post(serverURL, "application/json", bytes.NewBuffer(jsonData))
+		req, err := http.NewRequest("POST", serverURL, bytes.NewBuffer(jsonData))
+		if err != nil {
+			panic(err)
+		}
+
+		// Set headers
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-NodeID", fmt.Sprint(b.ID))
+		req.Header.Set("X-NodeType", commons.GetNodeType(commons.BrokerType))
+
+		resp, err := client.Do(req)
+
 		if err != nil {
 			return fmt.Errorf("error sending request to %s: %s", serverURL, err)
 		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("error reading response body: %v", err)
+		}
+		bodyString := string(body)
+
 
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("unexpected status code: %d for server %s", resp.StatusCode, serverURL)
+			return fmt.Errorf("unexpected status code: %d for server %s: error: %s", resp.StatusCode, serverURL,bodyString)
 		}
 		return nil
 	}
@@ -156,7 +263,6 @@ func (b *Broker) protocolDaemon(nextRun time.Time) {
 		if tc.Before(nextRun) {
 			continue
 		}
-		endWait := nextRun.Add(commons.WAIT_FOR_BROKER_PACKAGE)
 		nextRun = nextRun.Add(commons.EPOCH_PERIOD)
 		log.Printf("Next run will happpen at: %s\n",nextRun)
 
@@ -165,16 +271,16 @@ func (b *Broker) protocolDaemon(nextRun time.Time) {
 			log.Printf("Error broadcasting nodes info: %s", err)
 		}
 
-		// We do this instead of time.After because we don't know how long the Broadcast Nodes Info will take.
-		for innerTc := range ticker.C {
-			if innerTc.Equal(endWait) || innerTc.After(endWait) {
-				break
-			}
-		}
 		packageCounter++
-		pkg := b.CreatePackage(packageCounter)
 
-		log.Printf("package with transactions_count:%d created\n", len(pkg.Transactions))
+		var pkg *commons.Package
+		if b.isTest {
+			pkg = b.DummyPackage(packageCounter,10,10)
+		} else {
+			pkg= b.CreatePackage(packageCounter)
+		}
+
+		log.Printf("package %d with transactions_count:%d created\n",packageCounter, len(pkg.Transactions))
 
 		jsonData, err := json.Marshal(pkg)
 		if err != nil {
@@ -199,7 +305,7 @@ func (b *Broker) protocolDaemon(nextRun time.Time) {
 				retry.Do(
 					b.sendPackage(fmt.Sprintf("http://%s:%d%s", node.IP, node.Port,commons.SERVER_ADD_PACKAGE),jsonData),
 					retry.Attempts(commons.BROKER_RETRY),               // Number of retry attempts
-					retry.Delay(commons.BROKER_REQUEST_TIMEOUT),      // Delay between retries
+					retry.Delay(0),      // No delay
 					retry.DelayType(retry.FixedDelay), // Use fixed delay strategy
 					retry.OnRetry(func(n uint, err error) {
 						log.Printf("Retry attempt %d: %v\n", n+1, err)
@@ -210,6 +316,36 @@ func (b *Broker) protocolDaemon(nextRun time.Time) {
 
 		wg.Wait()
 	}
+}
+
+func (b *Broker) DummyPackage(packageCounter,nOperation,nTransaction int) *commons.Package {
+	var transactions []*commons.Transaction
+	for j:=0 ; j<nTransaction; j++ {
+		var operations []*commons.Operation
+		for i := 0; i < nOperation; i++ {
+			operation := &commons.Operation{
+				Key: fmt.Sprintf("key%d", i),
+				Value: fmt.Sprintf("value%d", i),
+				Op: 1,
+				Timestamp:   time.Now().UnixNano(),
+			}
+			operations = append(operations, operation)
+		}
+		transaction := &commons.Transaction{
+			Operations:  operations,
+		}
+		transactions = append(transactions, transaction)
+	}
+
+
+	pkg := &commons.Package{
+		BrokerID:       b.ID,
+		Transactions:   transactions,
+		PackageID: 	 packageCounter,
+	}
+
+	log.Printf("Dummy package %d with transactions_count:%d created\n",packageCounter, len(pkg.Transactions))
+	return pkg
 }
 
 func (b *Broker) CreatePackage(packageCounter int) *commons.Package {
@@ -245,6 +381,30 @@ func (b *Broker) CreatePackage(packageCounter int) *commons.Package {
 }
 
 func main() {
+	// Configure Lumberjack for log rotation
+	lumberjackLogger := &lumberjack.Logger{
+		Filename:   "./logs/app.log", // Log file path
+		MaxSize:    10,    // Max megabytes before log is rotated
+		MaxBackups: 5,     // Max old log files to keep
+		MaxAge:     28,    // Max days to retain old log files
+		Compress:   true,  // Compress old files (.gz)
+	}
+		
+	// Create Zap core with Lumberjack
+	writeSyncer := zapcore.AddSync(lumberjackLogger)
+	encoderConfig := zap.NewProductionEncoderConfig()
+	encoderConfig.TimeKey = "timestamp"
+	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+		
+	core := zapcore.NewCore(
+		zapcore.NewJSONEncoder(encoderConfig),
+		writeSyncer,
+		zapcore.InfoLevel,
+	)
+			
+	logger = zap.New(core)		
+	defer logger.Sync()
+
 	// Parse command line arguments
 	var directoryIP string
 	var directoryPort int
@@ -260,7 +420,8 @@ func main() {
 
 	var startTimestamp int64
 	flag.Int64Var(&startTimestamp, "startTimestamp", 0, "Start timestamp")
-
+	
+	isTest:=flag.Bool("test", false, "Run in test mode")
 	flag.Parse()
 
 	if directoryIP == "" {
@@ -279,7 +440,7 @@ func main() {
 		log.Fatalf("startTimestamp is required")
 	}
 
-	broker, err := NewBroker(0, brokerIP, brokerPort, directoryIP, directoryPort)
+	broker, err := NewBroker(0, brokerIP, brokerPort, directoryIP, directoryPort,*isTest)
 	if err != nil {
 		log.Fatalf("Error setting up broker: %v", err)
 	}

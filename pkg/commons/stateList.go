@@ -6,14 +6,14 @@ import (
 )
 
 type StateValue struct {
-	State int32
+	State int
 	Pkg *Package 
 }
 
-func (s *StateValue)  setState(state int32){
+func (s *StateValue)  setState(state int){
 	s.State=state
 }
-func (s * StateValue) getState() int32 {
+func (s * StateValue) getState() int {
 	return s.State
 }
 func (s *StateValue) getPackage() *Package {
@@ -31,11 +31,11 @@ func NewStateNode(value *StateValue) *StateNode {
 	}
 }
 
-func (n *StateNode) setState(state int32) {
+func (n *StateNode) setState(state int) {
 	n.val.setState(state)
 }
 
-func (n *StateNode) GetState() int32 {
+func (n *StateNode) GetState() int {
 	return n.val.getState()
 }
 
@@ -47,7 +47,7 @@ type StateList struct {
 	head *StateNode
 }
 
-func (l *StateList) GetState() int32 {
+func (l *StateList) GetState() int {
 	return l.head.GetState()
 }
 func (l *StateList) GetHead() *StateNode {

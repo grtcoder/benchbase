@@ -1,42 +1,48 @@
 package main
 
 import (
-	"bytes"
-	"fmt"
 	"io"
+	"lockfreemachine/pkg/commons"
+	"log"
 	"net/http"
+	"time"
+	"encoding/json"
 )
 
 func main() {
-	url := "http://directory.alpha-test1.l-free-machine.emulab.net:8080/registerServer"
+	url := "http://server1.alpha-test.l-free-machine.emulab.net:8083/requestPackage?brokerID=1"
 
-	// Example JSON data to send
-	jsonData := []byte(`{
-		"serverName": "my-test-server",
-		"ip": "192.168.1.10"
-	}`)
-
-	// Create POST request
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		panic(err)
+	client := &http.Client{
+		Timeout: time.Second,
 	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// Send the request
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := client.Get(url)
 	if err != nil {
-		panic(err)
+		log.Printf("error sending request to get package: %s", err)
+		return
 	}
 	defer resp.Body.Close()
 
-	// Read response
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		panic(err)
-	}
+	if resp.StatusCode == http.StatusOK {
+		// Read the response body
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("error reading response body: %s", err)
+			return
+		}
 
-	fmt.Printf("Status: %s\n", resp.Status)
-	fmt.Printf("Response Body:\n%s\n", string(body))
+		// Create a new package instance
+		pkg := &commons.Package{}
+		// Decode the JSON response
+		if err := json.Unmarshal(body, pkg); err != nil {
+			log.Printf("error decoding JSON response: %s", err)
+			return
+		}
+
+		// Process the package
+		log.Printf("Received package: %#v\n", pkg)
+		return
+	} else {
+		log.Printf("unexpected status code: %d", resp.StatusCode)
+		return
+	}
 }

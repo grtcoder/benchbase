@@ -17,11 +17,13 @@ read -p "Enter number of brokers: " numBroker
 read -p "Enter experiment name: " experimentName
 
 for ((i=1; i<=numBroker; i++)); do
+    echo "Sending broker to broker${i}"
     url="dmm6096@broker${i}.${experimentName}.l-free-machine.emulab.net:/users/dmm6096"
     scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null broker ${url} &
 done
 
 for ((i=1; i<=numServer; i++)); do
+    echo "Sending server to server${i}"
     url="dmm6096@server${i}.${experimentName}.l-free-machine.emulab.net:/users/dmm6096"
     scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null server ${url} &
 done

@@ -41,3 +41,5 @@ CMakeCache.txt
 scripts/broker
 scripts/directory
 scripts/server
+
+*.log

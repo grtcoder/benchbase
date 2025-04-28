@@ -12,15 +12,14 @@ import (
 )
 
 const (
-	BROADCAST_TIMEOUT=100*time.Millisecond
+	BROADCAST_TIMEOUT=5*time.Millisecond
 
-	EPOCH_PERIOD=5000 * time.Millisecond
+	EPOCH_PERIOD=200 * time.Millisecond
 
 	// We wait for 60% of the time for transactions. The rest of the transactions will be in the next package.
-	WAIT_FOR_TRANSACTIONS=(60*EPOCH_PERIOD)/100
-	WAIT_FOR_BROKER_PACKAGE=1000*time.Millisecond
-	BROKER_REQUEST_TIMEOUT=100*time.Millisecond
-	SERVER_REQUEST_TIMEOUT=100*time.Millisecond
+	WAIT_FOR_BROKER_PACKAGE=(50*EPOCH_PERIOD)/100
+	BROKER_REQUEST_TIMEOUT=5*time.Millisecond
+	SERVER_REQUEST_TIMEOUT=5*time.Millisecond
 	BROKER_RETRY=5
 	SERVER_RETRY=5
 )
@@ -78,22 +77,44 @@ type Transaction struct {
 
 // Declare constants for state of the package for an epoch.
 const (
-	Undefined  int32 = 1
-	NotReceived  int32 = 2
-	Received  int32 = 3
-	IgnoreBroker int32  = 4
+	Undefined  int = 1
+	NotReceived  int = 2
+	Received  int = 3
+	IgnoreBroker int  = 4
 )
 
 // Declare constants for the type of the node.
 const (
-	ServerType int32 = 1
-	BrokerType int32 = 2
+	ServerType int = 1
+	BrokerType int = 2
 )
+
+func GetNodeType(nodeType int) string {
+	switch nodeType {
+	case ServerType:
+		return "server"
+	case BrokerType:
+		return "broker"
+	default:
+		return "unknown"
+	}
+}
 
 type Package struct {
 	BrokerID int `json:"brokerID"`
 	PackageID int `json:"packageID"`
 	Transactions []*Transaction `json:"transactions"`
+}
+
+func DummyTransactions () []*Transaction {
+	// Create a dummy transaction with some operations
+	operations := []*Operation{
+		{Timestamp: 1, Key: "key1", Value: "value1", Op: 1},
+		{Timestamp: 2, Key: "key2", Value: "value2", Op: 2},
+	}
+	return []*Transaction{
+		{Operations: operations},
+	}
 }
 
 
@@ -116,7 +137,13 @@ func (m *DirectoryMap) Set(key int, value *NodeInfo) {
 func HandleUpdateDirectory(directoryInfo *NodesMap) func(w http.ResponseWriter, r *http.Request) {
 	return func (w http.ResponseWriter, r *http.Request) {
 		// Read data from request
-		log.Printf("Received update directory request\n")
+		nodeType := r.Header.Get("X-NodeType")
+		nodeID := r.Header.Get("X-NodeID")
+		if nodeType == "" || nodeID == "" {
+			nodeType="unknown"
+			nodeID = "unknown"
+		}
+		log.Printf("Received update directory request from %s%s\n",nodeType,nodeID)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "Error reading request body", http.StatusBadRequest)
@@ -138,16 +165,12 @@ func HandleUpdateDirectory(directoryInfo *NodesMap) func(w http.ResponseWriter, 
 	}
 }
 
-func BroadcastNodesInfo(currNodeID int, currNodeType int32,directoryInfo *NodesMap) error {
+func BroadcastNodesInfo(currNodeID int, currNodeType int,directoryInfo *NodesMap) error {
 	var wg sync.WaitGroup
-
 	jsonData, err := json.Marshal(directoryInfo)
 	if err != nil {
 		return fmt.Errorf("error encoding JSON: %v", err)
 	}
-	client := &http.Client{
-        Timeout: BROADCAST_TIMEOUT,
-    }
 
 	for id, node := range directoryInfo.BrokerMap.Data {
 		if id == currNodeID && currNodeType == BrokerType {
@@ -157,19 +180,33 @@ func BroadcastNodesInfo(currNodeID int, currNodeType int32,directoryInfo *NodesM
 		log.Printf("Sending broadcast request to broker %d: %s:%d", id, node.IP, node.Port)
 
 		wg.Add(1)
-		go func(id int, node *NodeInfo) {
+		go func(id,currNodeID int, node *NodeInfo) {
 			defer wg.Done()
 
-			resp, err := client.Post(fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, BROKER_UPDATE_DIRECTORY), "application/json", bytes.NewBuffer(jsonData))
+			client := &http.Client{
+				Timeout: BROADCAST_TIMEOUT,
+			}
+
+			req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, BROKER_UPDATE_DIRECTORY), bytes.NewBuffer(jsonData))
 			if err != nil {
-				log.Printf("Error sending request to server %d: %s", id, err)
+				panic(err)
+			}
+
+			// Set headers
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-NodeID", fmt.Sprint(currNodeID))
+			req.Header.Set("X-NodeType", GetNodeType(currNodeID))
+
+			resp, err := client.Do(req)
+			if err != nil {
+				log.Printf("Error sending request to broker %d: %s", id, err)
 				return
 			}
 
 			if resp.StatusCode != http.StatusOK {
-				log.Printf("Unexpected status code: %d for server %d", resp.StatusCode, id)
+				log.Printf("Unexpected status code: %d for broker %d", resp.StatusCode, id)
 			}
-		}(id, node)
+		}(id,currNodeID, node)
 	}
 
 	for id, node := range directoryInfo.ServerMap.Data {
@@ -183,7 +220,21 @@ func BroadcastNodesInfo(currNodeID int, currNodeType int32,directoryInfo *NodesM
 		go func(id int, node *NodeInfo) {
 			defer wg.Done()
 
-			resp, err := client.Post(fmt.Sprintf("http://%s:%d%s", node.IP, node.Port,SERVER_UPDATE_DIRECTORY), "application/json", bytes.NewBuffer(jsonData))
+			client := &http.Client{
+				Timeout: BROADCAST_TIMEOUT,
+			}
+
+			req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, BROKER_UPDATE_DIRECTORY), bytes.NewBuffer(jsonData))
+			if err != nil {
+				panic(err)
+			}
+
+			// Set headers
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-NodeID", fmt.Sprint(currNodeID))
+			req.Header.Set("X-NodeType", GetNodeType(currNodeID))
+
+			resp, err := client.Do(req)
 			if err != nil {
 				log.Printf("Error sending request to server %d: %s", id, err)
 				return
