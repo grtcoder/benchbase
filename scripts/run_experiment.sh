@@ -16,20 +16,23 @@ read -p "Enter number of servers: " numServer
 read -p "Enter number of brokers: " numBroker
 read -p "Enter experiment name: " experimentName
 
+# Setup monitoring
+
+
 for ((i=1; i<=numBroker; i++)); do
     echo "Sending broker to broker${i}"
     url="dmm6096@broker${i}.${experimentName}.l-free-machine.emulab.net:/users/dmm6096"
-    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null broker ${url} &
+    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null broker ./configs/promtail-config.yml ${url} &
 done
 
 for ((i=1; i<=numServer; i++)); do
     echo "Sending server to server${i}"
     url="dmm6096@server${i}.${experimentName}.l-free-machine.emulab.net:/users/dmm6096"
-    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null server ${url} &
+    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null server ./configs/promtail-config.yml ${url} &
 done
 
 url="dmm6096@directory.${experimentName}.l-free-machine.emulab.net:/users/dmm6096"
-scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null directory ${url} &
+scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null directory ./configs/promtail-config.yml ${url} &
 
 wait
 echo "All binary transfers are complete."
@@ -58,7 +61,8 @@ for ((i=1; i<=numBroker; i++)); do
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${broker_url} << EOF
         # Commands to execute on the broker
         cd /users/dmm6096
-        ./broker -directoryIP=${directory_url:8} -directoryPort 8080 -brokerIP=${broker_url:8} -brokerPort 8083 -startTimestamp ${scheduleTimestamp} > output.log 2>&1 &
+        nohup promtail --config.file=promtail-config.yml > /dev/null 2>&1 &
+        nohup ./broker -directoryIP=${directory_url:8} -directoryPort 8080 -brokerIP=${broker_url:8} -brokerPort 8083 -startTimestamp ${scheduleTimestamp} -logFile ./logs/broker${i}.log > /dev/null 2>&1 &
         disown
         exit
 EOF
@@ -69,7 +73,8 @@ for ((i=1; i<=numServer; i++)); do
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${server_url} << EOF
         # Commands to execute on the broker
         cd /users/dmm6096
-        ./server -directoryIP=${directory_url:8} -directoryPort 8080 -serverIP=${server_url:8} -serverPort 8083 -startTimestamp ${scheduleTimestamp} > output.log 2>&1 &
+        nohup promtail --config.file=promtail-config.yml > /dev/null 2>&1 &
+        nohup ./server -directoryIP=${directory_url:8} -directoryPort 8080 -serverIP=${server_url:8} -serverPort 8083 -startTimestamp ${scheduleTimestamp} -logFile ./logs/server${i}.log > /dev/null 2>&1 &
         disown
         exit
 EOF

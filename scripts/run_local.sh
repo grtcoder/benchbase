@@ -26,13 +26,13 @@ sleep 2
 
 for ((i=1; i<=numServer; i++)); do
         # Commands to execute on the broker
-        ./server -directoryIP=localhost -directoryPort 8080 -serverIP=localhost -serverPort $((9080+${i})) -startTimestamp ${scheduleTimestamp} > output_server${i}.log 2>&1 &
+        ./server -directoryIP=localhost -directoryPort 8080 -serverIP=localhost -serverPort $((9080+${i})) -startTimestamp ${scheduleTimestamp} -logFile ./logs/server${i}.log &
 done
 
 # Loop over brokers and send multi-line SSH commands
 for ((i=1; i<=numBroker; i++)); do
         # Commands to execute on the broker
-        ./broker -test -directoryIP=localhost -directoryPort 8080 -brokerIP=localhost -brokerPort $((8080+${i})) -startTimestamp ${scheduleTimestamp} > output_broker${i}.log 2>&1 &
+        ./broker -test -directoryIP=localhost -directoryPort 8080 -brokerIP=localhost -brokerPort $((8080+${i})) -startTimestamp ${scheduleTimestamp} -logFile ./logs/broker${i}.log &
 done
 
 disown

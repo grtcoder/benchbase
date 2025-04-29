@@ -34,6 +34,9 @@ for ((i=1; i<=numServer; i++)); do
         cd /users/dmm6096
         sudo pkill -f server
         rm -f server output.log *.json
+        rm -rf logs
+        rm -rf packages*
+        sudo pkill -f promtail
         exit
 EOF
     if [ $? -eq 0 ]; then
@@ -48,6 +51,8 @@ ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${directory_url}
         # Commands to execute on the broker
         cd /users/dmm6096
         sudo pkill -f directory
+        rm -rf logs
+        sudo pkill -f promtail
         sudo rm -f directory output.log
         exit
 EOF

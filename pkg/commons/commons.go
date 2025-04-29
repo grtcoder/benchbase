@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 const (
@@ -134,7 +135,7 @@ func (m *DirectoryMap) Set(key int, value *NodeInfo) {
 	m.Data[key] = value
 }
 
-func HandleUpdateDirectory(directoryInfo *NodesMap) func(w http.ResponseWriter, r *http.Request) {
+func HandleUpdateDirectory(logger *zap.Logger,directoryInfo *NodesMap) func(w http.ResponseWriter, r *http.Request) {
 	return func (w http.ResponseWriter, r *http.Request) {
 		// Read data from request
 		nodeType := r.Header.Get("X-NodeType")
@@ -143,7 +144,7 @@ func HandleUpdateDirectory(directoryInfo *NodesMap) func(w http.ResponseWriter, 
 			nodeType="unknown"
 			nodeID = "unknown"
 		}
-		log.Printf("Received update directory request from %s%s\n",nodeType,nodeID)
+		logger.Info("Received update directory request", zap.String("nodeType", nodeType), zap.String("nodeID", nodeID))
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "Error reading request body", http.StatusBadRequest)
@@ -154,7 +155,7 @@ func HandleUpdateDirectory(directoryInfo *NodesMap) func(w http.ResponseWriter, 
 		// Process the data
 		newDirectoryMap := &NodesMap{}
 		if err := json.Unmarshal(body, &newDirectoryMap); err != nil {
-			log.Printf("Error unmarshalling JSON: %s", err)
+			logger.Error("Error unmarshalling JSON", zap.Error(err))
 			http.Error(w, "Error unmarshalling JSON", http.StatusBadRequest)
 			return
 		}
@@ -165,10 +166,11 @@ func HandleUpdateDirectory(directoryInfo *NodesMap) func(w http.ResponseWriter, 
 	}
 }
 
-func BroadcastNodesInfo(currNodeID int, currNodeType int,directoryInfo *NodesMap) error {
+func BroadcastNodesInfo(logger *zap.Logger,currNodeID int, currNodeType int,directoryInfo *NodesMap) error {
 	var wg sync.WaitGroup
 	jsonData, err := json.Marshal(directoryInfo)
 	if err != nil {
+		logger.Error("Error encoding JSON", zap.Error(err))
 		return fmt.Errorf("error encoding JSON: %v", err)
 	}
 
@@ -177,7 +179,7 @@ func BroadcastNodesInfo(currNodeID int, currNodeType int,directoryInfo *NodesMap
 			continue
 		}
 
-		log.Printf("Sending broadcast request to broker %d: %s:%d", id, node.IP, node.Port)
+		logger.Info("Sending broadcast request to broker", zap.Int("id", id), zap.String("ip", node.IP), zap.Int64("port", node.Port))
 
 		wg.Add(1)
 		go func(id,currNodeID int, node *NodeInfo) {
@@ -199,12 +201,12 @@ func BroadcastNodesInfo(currNodeID int, currNodeType int,directoryInfo *NodesMap
 
 			resp, err := client.Do(req)
 			if err != nil {
-				log.Printf("Error sending request to broker %d: %s", id, err)
+				logger.Error("Error sending request to broker", zap.Int("id", id), zap.Error(err))
 				return
 			}
 
 			if resp.StatusCode != http.StatusOK {
-				log.Printf("Unexpected status code: %d for broker %d", resp.StatusCode, id)
+				logger.Error("Unexpected status code", zap.Int("status_code", resp.StatusCode), zap.Int("broker_id", id))
 			}
 		}(id,currNodeID, node)
 	}
@@ -214,7 +216,7 @@ func BroadcastNodesInfo(currNodeID int, currNodeType int,directoryInfo *NodesMap
 			continue
 		}
 
-		log.Printf("Sending broadcast request to server %d: %s:%d", id, node.IP, node.Port)
+		logger.Info("Sending broadcast request to server", zap.Int("id", id), zap.String("ip", node.IP), zap.Int64("port", node.Port))
 
 		wg.Add(1)
 		go func(id int, node *NodeInfo) {
@@ -226,7 +228,9 @@ func BroadcastNodesInfo(currNodeID int, currNodeType int,directoryInfo *NodesMap
 
 			req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, BROKER_UPDATE_DIRECTORY), bytes.NewBuffer(jsonData))
 			if err != nil {
-				panic(err)
+				// Handle error
+				logger.Warn("Error creating request", zap.Int("id", id), zap.Error(err))
+				return
 			}
 
 			// Set headers
@@ -236,18 +240,19 @@ func BroadcastNodesInfo(currNodeID int, currNodeType int,directoryInfo *NodesMap
 
 			resp, err := client.Do(req)
 			if err != nil {
-				log.Printf("Error sending request to server %d: %s", id, err)
+				logger.Warn("Error sending request to server", zap.Int("id", id), zap.Error(err))
 				return
 			}
 
 			if resp.StatusCode != http.StatusOK {
-				log.Printf("Unexpected status code: %d for server %d", resp.StatusCode, id)
+				logger.Warn("Unexpected status code", zap.Int("status_code", resp.StatusCode), zap.Int("server_id", id))
 			}
 		}(id, node)
 	}
 
 	wg.Wait()
-	log.Printf("Broadcast method complete.")
+
+	logger.Info("Broadcasting nodes info complete", zap.Int("currNodeID", currNodeID), zap.Int("currNodeType", currNodeType))
 	return nil
 }
 
