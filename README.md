@@ -28,8 +28,11 @@ sudo ufw deny from <IP>
 ## Commands to block incoming packets via ufw
 
 ```bash
-sudo ufw deny from 155.98.38.141
-sudo ufw allow from any
+sudo ufw reset             # (if you want a clean slate)
+sudo ufw default allow incoming
+sudo ufw default allow outgoing
+sudo ufw deny from 155.98.38.121
 sudo ufw enable
 ```
+
 

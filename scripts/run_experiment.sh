@@ -34,6 +34,9 @@ done
 url="dmm6096@directory.${experimentName}.l-free-machine.emulab.net:/users/dmm6096"
 scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null directory ./configs/promtail-config.yml ${url} &
 
+url="dmm6096@monitoring.${experimentName}.l-free-machine.emulab.net:/users/dmm6096"
+scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ./configs/loki-config.yml ${url} &
+
 wait
 echo "All binary transfers are complete."
 
@@ -44,6 +47,16 @@ ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${directory_url}
         # Commands to execute on the broker
         cd /users/dmm6096
         ./directory > output.log 2>&1 &
+        disown
+        exit
+EOF
+
+monitoring_url="dmm6096@monitoring.${experimentName}.l-free-machine.emulab.net"
+# Start the directory first
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${directory_url} << EOF
+        # Commands to execute on the broker
+        cd /users/dmm6096
+        nohup loki -config.file=loki-config.yml > /dev/null 2>&1 &
         disown
         exit
 EOF

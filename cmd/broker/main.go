@@ -1,4 +1,4 @@
-package main
+package broker
 
 import (
 	"bytes"
@@ -282,7 +282,7 @@ func (b *Broker) protocolDaemon(nextRun time.Time) {
 			logger.Error("Error marshalling package", zap.Error(err))
 			continue
 		}
-		
+
 
 		var wg sync.WaitGroup
 		for serverID, node := range b.DirectoryInfo.ServerMap.Data {

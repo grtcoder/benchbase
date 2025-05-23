@@ -15,7 +15,7 @@ import (
 const (
 	BROADCAST_TIMEOUT=5*time.Millisecond
 
-	EPOCH_PERIOD=200 * time.Millisecond
+	EPOCH_PERIOD=500 * time.Millisecond
 
 	// We wait for 60% of the time for transactions. The rest of the transactions will be in the next package.
 	WAIT_FOR_BROKER_PACKAGE=(50*EPOCH_PERIOD)/100

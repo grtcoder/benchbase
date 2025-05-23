@@ -35,3 +35,15 @@ for ((i=1; i<=numServer; i++)); do
         exit
 EOF
 done
+
+server_url="dmm6096@monitoring.${experimentName}.l-free-machine.emulab.net"
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${server_url} << EOF
+ # Commands to execute on the broker
+cd /users/dmm6096
+curl -O -L "https://github.com/grafana/loki/releases/latest/download/loki-linux-amd64.zip"
+unzip loki-linux-amd64.zip
+chmod +x loki-linux-amd64
+sudo mv loki-linux-amd64 /usr/local/bin/loki
+rm loki-linux-amd64*
+exit
+EOF

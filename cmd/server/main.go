@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"bytes"
@@ -387,7 +387,9 @@ func (s *Server) handleReadPackageStorage(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// This looks weird but we need to get the packageID from the head of the state list.
 	packageIDInt := currHead.GetPackage().PackageID
+
 	pkg,err :=s.readPackage(brokerIDInt,packageIDInt)
 	if err != nil {
 		logger.Error("error reading package", zap.String("filePath", fmt.Sprintf("./packages_%d/pkg_%d_%d.json",s.serverID,brokerIDInt,packageIDInt)), zap.Error(err))
@@ -671,7 +673,7 @@ func main() {
 
 	err := os.Mkdir("./logs", 0755)
 	if err != nil {
-		fmt.Errorf("failed to create logs directory: %v", err)
+		fmt.Printf("failed to create logs directory: %v", err)
 		return
 	}
 	lumberjackLogger := &lumberjack.Logger{

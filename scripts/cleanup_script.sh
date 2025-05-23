@@ -15,8 +15,10 @@ for ((i=1; i<=numBroker; i++)); do
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${broker_url} << EOF
         # Commands to execute on the broker
         cd /users/dmm6096
+        rm -rf logs
         sudo pkill -f broker
-        rm -f broker output.log
+        sudo pkill -f promtail
+        rm -f broker
         exit
 EOF
     if [ $? -eq 0 ]; then
