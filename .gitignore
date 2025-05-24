@@ -43,3 +43,5 @@ scripts/directory
 scripts/server
 
 *.log
+
+scripts/package*
