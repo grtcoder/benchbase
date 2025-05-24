@@ -24,16 +24,18 @@ import (
     "gopkg.in/natefinch/lumberjack.v2"
 )
 
+// zap logger instance to log messages
 var logger *zap.Logger
 
 const ( 
-	// Protocol time in seconds
-
+	// Maximum number of packages the package Array can hold.
 	BUFFER_SIZE=10000
+
+	// Maximum number of packages the write channel can hold.
 	WRITE_BUFFER_SIZE=100
 )
 
-
+// writeToFile is a goroutine that writes packages to files.
 func (s *Server) writeToFile() {
 	err := os.MkdirAll(fmt.Sprintf("./packages_%d",s.serverID), os.ModePerm)
 	if err != nil {
@@ -52,29 +54,32 @@ func (s *Server) writeToFile() {
 	logger.Info("Write channel closed, stopping file writing.")
 }
 
+// Server struct represents the server instance.
 type Server struct {
-	ip string
-	port int
-	directoryAddr string
-	DirectoryInfo  *commons.NodesMap
-	serverID int
-	writeChan chan *commons.Package
-	answer map[int]*commons.StateList
-
-	packageArray *queue.RingBuffer
+	ip string // IP address of the server
+	port int // Port number of the server
+	directoryAddr string // Address of the directory service
+	DirectoryInfo  *commons.NodesMap // Directory information
+	serverID int // Server ID
+	writeChan chan *commons.Package // Channel to write packages to files
+	answer map[int]*commons.StateList // Map of broker IDs to their states
+	packageArray *queue.RingBuffer // Array to hold packages
 }
 
+// requestPackage sends a request to the server to get a package.
 func (s *Server) requestPackage(serverURL string,brokerID int,pkg *commons.Package) func() error {
 	return func() error {
 		client := &http.Client{
 			Timeout: commons.SERVER_REQUEST_TIMEOUT,
 		}
+
+		// Create a new HTTP request to request package
 		req, err := http.NewRequest("GET", fmt.Sprintf("%s?brokerID=%d",serverURL,brokerID), nil)
 		if err != nil {
 			panic(err)
 		}
 
-		// Set headers
+		// Set headers for the request
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-NodeID", fmt.Sprint(s.serverID))
 		req.Header.Set("X-NodeType", commons.GetNodeType(commons.ServerType))

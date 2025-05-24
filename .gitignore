@@ -45,3 +45,4 @@ scripts/server
 *.log
 
 scripts/package*
+scripts/logs
