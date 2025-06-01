@@ -1,4 +1,4 @@
-package server
+package main
 
 import (
 	"bytes"
@@ -6,7 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"lockfreemachine/pkg/commons"
+	"lockfreemachine/src/pkg/commons"
 	"net/http"
 	"os"
 	"os/signal"
@@ -43,7 +43,7 @@ func (s *Server) writeToFile() {
 		return
 	}
 	for data := range s.writeChan {
-		
+		// Read from the write channel and write the package to a file.
 		err := s.writePackage(data)
 		if err != nil {
 			logger.Error("Failed to write package to file", zap.Error(err))
@@ -52,6 +52,23 @@ func (s *Server) writeToFile() {
 	}
 
 	logger.Info("Write channel closed, stopping file writing.")
+}
+// findSetDifference finds the set difference between two lists of integers.
+func findSetDifference(list1, list2 []int) []int {
+	set := make(map[int]bool)
+	result := []int{}
+
+	for _, num := range list1 {
+		set[num] = true
+	}
+
+	for _, num := range list2 {
+		if _, ok := set[num]; !ok {
+			result = append(result, num)
+		}
+	}
+
+	return result
 }
 
 // Server struct represents the server instance.
@@ -116,6 +133,44 @@ func (s *Server) requestPackage(serverURL string,brokerID int,pkg *commons.Packa
 	}
 }
 
+func (s *Server) sendPackage(serverURL string,jsonData []byte) func() error {
+	return func() error {
+		// Create an HTTP client with a per-request timeout
+		client := &http.Client{
+
+			// TODO: Change it to another configurable value.
+			Timeout: commons.SERVER_REQUEST_TIMEOUT,
+		}
+
+		req, err := http.NewRequest("POST", serverURL, bytes.NewBuffer(jsonData))
+		if err != nil {
+			panic(err)
+		}
+
+		// Set headers
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-NodeID", fmt.Sprint(s.serverID))
+		req.Header.Set("X-NodeType", commons.GetNodeType(commons.ServerType))
+
+		resp, err := client.Do(req)
+
+		if err != nil {
+			return fmt.Errorf("error sending request to %s: %s", serverURL, err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("error reading response body: %v", err)
+		}
+		bodyString := string(body)
+
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("unexpected status code: %d for server %s: error: %s", resp.StatusCode, serverURL,bodyString)
+		}
+		return nil
+	}
+}
+
 func (s *Server) requestPackageWithRetry(serverURL string,brokerID int) (*commons.Package,error) {
 	pkg := &commons.Package{}
 	err := retry.Do(
@@ -137,7 +192,6 @@ func (s *Server) setupAnswerMap() {
 		if _,ok := s.answer[k];ok {
 			if s.answer[k].GetHead().GetState() != commons.IgnoreBroker {
 				s.answer[k]=commons.NewStateList()
-
 			}
 		} else {
 			s.answer[k]=commons.NewStateList()
@@ -361,10 +415,14 @@ func (s *Server) handleBrokerOk(w http.ResponseWriter, r *http.Request) {
 	logger.Info("Received package from broker", zap.Int("brokerID", pkg.BrokerID), zap.Int("packageID", pkg.PackageID))
 
 	if ok:=s.answer[pkg.BrokerID].UpdateState(currHead,commons.NewStateNode(&commons.StateValue{State: commons.Received,Pkg: pkg})); ok {
+		// If the package is successfully updated, we put it in the packageArray and write it to the write channel.
+
 		s.packageArray.Put(pkg)
 		s.writeChan <- pkg
 	}
-	// Write to file
+
+	// Write the package to file
+	// TODO: Remove this after testing.
 	if err := s.writePackage(pkg); err != nil {
 		logger.Error("error writing package to file", zap.String("filePath", fmt.Sprintf("./packages_%d/pkg_%d_%d.json",s.serverID,pkg.BrokerID,pkg.PackageID)), zap.Error(err))
 		http.Error(w, "Error writing package to file", http.StatusInternalServerError)
@@ -415,7 +473,9 @@ func (s *Server) setupServer() (*http.Server,error) {
 	r.HandleFunc(commons.SERVER_UPDATE_DIRECTORY, commons.HandleUpdateDirectory(logger,s.DirectoryInfo)).Methods("POST")
 	r.HandleFunc(commons.SERVER_ADD_PACKAGE, s.handleAddPackage).Methods("POST")
 	r.HandleFunc(commons.SERVER_REQUEST_PACKAGE, s.handleRequestPackage).Methods("GET")
+
 	r.HandleFunc(commons.SERVER_READ_STORAGE, s.handleReadPackageStorage).Methods("GET")
+
 	r.HandleFunc(commons.SERVER_IGNORE_BROKER,s.handleIgnoreBroker).Methods("POST")
 	r.HandleFunc(commons.SERVER_BROKER_OK,s.handleBrokerOk).Methods("POST")
 
@@ -518,6 +578,24 @@ func (s *Server) sendIgnoreBroker(serverURL string) func() error{
 		return nil
 	}
 }
+
+func (s *Server) sendBrokerOkWithRetry(serverURL string, pkg *commons.Package) error {
+		// Encode package to JSON
+	jsonData, err := json.Marshal(pkg)
+	if err != nil {
+		logger.Error("Failed to encode package to JSON", zap.Error(err))
+		return fmt.Errorf("error encoding JSON: %s", err)
+	}
+	return retry.Do(
+		s.sendPackage(serverURL, jsonData),
+		retry.Attempts(commons.SERVER_RETRY),               // Number of retry attempts
+		retry.Delay(0),      // No delay
+		retry.DelayType(retry.FixedDelay), // Use fixed delay strategy
+		retry.OnRetry(func(n uint, err error) {
+			logger.Error("Retrying broker ok request", zap.String("serverURL", serverURL), zap.Int("brokerID", pkg.BrokerID), zap.Int("attempt", int(n)+1), zap.Error(err))
+		}),
+	)
+}
 func (s *Server) sendIgnoreBrokerWithRetry(serverURL string) error {
 	return retry.Do(
 		s.sendIgnoreBroker(serverURL),
@@ -528,6 +606,37 @@ func (s *Server) sendIgnoreBrokerWithRetry(serverURL string) error {
 			logger.Error("Retrying ignore broker request", zap.String("serverURL", serverURL), zap.Int("attempt", int(n)+1), zap.Error(err))
 		}),
 	)
+}
+
+func (s *Server) sendBrokerOkRequests(brokerList []int) {
+	var wg sync.WaitGroup
+	for _,brokerID := range brokerList {
+		brokerID := brokerID
+		serverMap := s.DirectoryInfo.ServerMap
+		for serverID := range serverMap.Data {
+			// Skip the current server
+			if serverID == s.serverID {
+				continue
+			}
+
+			currHead := s.answer[brokerID].GetHead()
+			pkg := currHead.GetPackage()
+
+			serverID := serverID
+			serverURL := fmt.Sprintf("http://%s:%d%s?brokerID=%d",serverMap.Data[serverID].IP,serverMap.Data[serverID].Port,commons.SERVER_BROKER_OK,brokerID)
+			wg.Add(1)
+			go func(serverURL string,brokerID int) {
+				defer wg.Done()
+				err := s.sendBrokerOkWithRetry(serverURL,pkg)
+				if err != nil {
+					logger.Error("error while sending ignore broker request", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Error(err))
+					return
+				}
+				logger.Info("Ignore broker request sent to server", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID))
+			}(serverURL, brokerID)
+		}
+	}
+	wg.Wait()
 }
 
 func (s *Server) sendIgnoreBrokerRequests(brokerList []int) {
@@ -559,8 +668,8 @@ func (s *Server) sendIgnoreBrokerRequests(brokerList []int) {
 
 
 func (s *Server) protocolDaemon(nextRun time.Time) {
-	// Daemon routine
-		// Setup the answerMap for fresh epoch.
+		// Daemon routine to run the protocol every epoch period.
+
 		// We want the ticker to have millisecond precision
 		ticker := time.NewTicker(time.Millisecond)
 		logger.Info("Protocol Daemon started")
@@ -575,15 +684,19 @@ func (s *Server) protocolDaemon(nextRun time.Time) {
 			waitPackage := nextRun.Add(commons.WAIT_FOR_BROKER_PACKAGE)
 			nextRun = nextRun.Add(commons.EPOCH_PERIOD)
 
+			// Setup the answer map for fresh epoch.
 			s.setupAnswerMap()
+
 			err:=commons.BroadcastNodesInfo(logger,s.serverID,commons.ServerType,s.DirectoryInfo)
 			if err!=nil {
 				logger.Error("error while broadcasting directory info", zap.Error(err))
 			}
 
-			logger.Info("Answer map is setup, waiting for packages...")
+			logger.Info("Step 1: Answer map is setup, waiting for packages...")
+
 			// Wait for Brokers to send packages.
-		// We do this instead of time.After because we don't know how long the Broadcast Nodes Info will take.
+
+			// We do this instead of time.After because we don't know how long the Broadcast Nodes Info will take.
 			for innerTc := range ticker.C {
 				if innerTc.Equal(waitPackage) || innerTc.After(waitPackage) {
 					break
@@ -591,23 +704,33 @@ func (s *Server) protocolDaemon(nextRun time.Time) {
 			}
 			logger.Info("Waiting time is up, checking for received packages...")
 
+			// Update the state of packages that are not received.
 			s.updateNotReceivedPackage()
 
-			brokerList:= s.getBrokerList(commons.NotReceived)
-			logger.Info("Missing Packages",zap.Any("list",brokerList))
-			s.requestPackages(commons.SERVER_REQUEST_PACKAGE,brokerList)
+			firstPendingBrokerList:= s.getBrokerList(commons.NotReceived)
+			logger.Info("Missing Packages",zap.Any("list",firstPendingBrokerList))
+
+			logger.Info("Step 2: Requesting packages from other servers...")
+			s.requestPackages(commons.SERVER_REQUEST_PACKAGE,firstPendingBrokerList)
 
 			// Request package from the memory of other servers.
 			// Get the list of brokers for which we have still not received the package.
-			brokerList= s.getBrokerList(commons.NotReceived)
-			logger.Info("Missing Packages",zap.Any("list",brokerList))
+			pendingBrokerList := s.getBrokerList(commons.NotReceived)
+			logger.Info("Missing Packages",zap.Any("list",pendingBrokerList))
 
+	 		logger.Info("Step 3: Requesting packages from storage of other servers...")
+			logger.Info("Missing Packages",zap.Any("list",pendingBrokerList))
+			s.requestPackages(commons.SERVER_READ_STORAGE,pendingBrokerList)
 
-			s.requestPackages(commons.SERVER_READ_STORAGE,brokerList)
+			pendingBrokerList= s.getBrokerList(commons.NotReceived)
+			completedBrokerList := s.getBrokerList(commons.Received)
 
-			brokerList= s.getBrokerList(commons.NotReceived)
+			brokerPackagesFromServer:=findSetDifference(firstPendingBrokerList,completedBrokerList)
+			logger.Info("Step 4 : Sending broker ok request to other with servers ( with packages )")
+			s.sendBrokerOkRequests(brokerPackagesFromServer)
 
-			for _,brokerID := range brokerList {
+			logger.Info("Complete Packages",zap.Any("list",completedBrokerList))
+			for _,brokerID := range pendingBrokerList {
 				if s.answer[brokerID].GetHead().GetState() == commons.NotReceived {
 					// We want to ignore the broker if the package is not received.
 					if ok:=s.answer[brokerID].UpdateState(s.answer[brokerID].GetHead(),commons.NewStateNode(&commons.StateValue{State: commons.IgnoreBroker,Pkg: nil})); ok {
@@ -615,15 +738,14 @@ func (s *Server) protocolDaemon(nextRun time.Time) {
 					}
 				}
 			}
-		
+
 			// Send ignore broker requests to other servers.
-			logger.Info("Sending ignore broker requests to other servers for brokers",zap.Any("brokers",brokerList))
-			s.sendIgnoreBrokerRequests(brokerList)
+			logger.Info("Sending ignore broker requests to other servers for brokers",zap.Any("brokers",pendingBrokerList))
+			s.sendIgnoreBrokerRequests(pendingBrokerList)
 
 			logger.Info("Protocol Completed")
 
 			logger.Info("Next run will happen at: %s", zap.Time("nextRun", nextRun))
-
 	}
 }
 

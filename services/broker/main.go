@@ -1,4 +1,4 @@
-package broker
+package main
 
 import (
 	"bytes"
@@ -7,7 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"lockfreemachine/pkg/commons"
+	"lockfreemachine/src/pkg/commons"
 	"net/http"
 	"os"
 	"os/signal"
@@ -34,6 +34,7 @@ var (
 )
 
 func initMetrics(brokerID int) {
+
 	 // Create a wrapped Registerer that injects labels
 	wrappedRegisterer := prometheus.WrapRegistererWith(
 			prometheus.Labels{"brokerID": fmt.Sprint(brokerID)}, // <- static label here
@@ -337,13 +338,11 @@ func (b *Broker) DummyPackage(packageCounter,nOperation,nTransaction int) *commo
 		transactions = append(transactions, transaction)
 	}
 
-
 	pkg := &commons.Package{
 		BrokerID:       b.ID,
 		Transactions:   transactions,
 		PackageID: 	 packageCounter,
 	}
-
 	
 	logger.Info("Dummy package created",zap.Int("packageCounter",packageCounter),zap.Int("transactionsCount",len(pkg.Transactions)))
 	return pkg

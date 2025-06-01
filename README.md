@@ -36,3 +36,12 @@ sudo ufw enable
 ```
 
 
+
+## How to run scripts
+
+First run setup_monitoring.sh
+Then run_experiment.sh
+
+
+loki -config.file=loki-config.yaml
+

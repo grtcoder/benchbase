@@ -3,13 +3,11 @@
 # Send the binaries to all the servers and brokers
 ###############
 
-read -p "Enter number of servers: " numServer
-read -p "Enter number of brokers: " numBroker
-read -p "Enter experiment name: " experimentName
+source ./env-vars.sh
 
 # Loop over brokers and send multi-line SSH commands
 for ((i=1; i<=numBroker; i++)); do
-    broker_url="dmm6096@broker${i}.${experimentName}.l-free-machine.emulab.net"
+    broker_url="dmm6096@broker${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${broker_url} << EOF
         # Commands to execute on the broker
         cd /users/dmm6096
@@ -23,7 +21,7 @@ EOF
 done
 
 for ((i=1; i<=numServer; i++)); do
-    server_url="dmm6096@server${i}.${experimentName}.l-free-machine.emulab.net"
+    server_url="dmm6096@server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${server_url} << EOF
         # Commands to execute on the broker
         cd /users/dmm6096
@@ -36,7 +34,7 @@ for ((i=1; i<=numServer; i++)); do
 EOF
 done
 
-server_url="dmm6096@monitoring.${experimentName}.l-free-machine.emulab.net"
+server_url="dmm6096@monitoring.${experimentName}.${projectName}.${clusterType}.${suffix}"
 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${server_url} << EOF
  # Commands to execute on the broker
 cd /users/dmm6096

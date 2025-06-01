@@ -1,4 +1,4 @@
-package directory
+package main
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"os/signal"
 	"time"
 
-	"lockfreemachine/pkg/commons"
+	"lockfreemachine/src/pkg/commons"
 
 	"github.com/gorilla/mux"
 )
