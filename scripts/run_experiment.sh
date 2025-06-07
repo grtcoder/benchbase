@@ -17,44 +17,48 @@ source ./env-vars.sh
 # Setup monitoring
 for ((i=1; i<=numBroker; i++)); do
     echo "Sending broker to broker${i}"
-    url="dmm6096@broker${i}.${experimentName}.${projectName}.${clusterType}.${suffix}:/users/dmm6096"
+    url="at6404@broker${i}.${experimentName}.${projectName}.${clusterType}.${suffix}:/users/at6404"
     scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null broker ./configs/promtail-config.yml ${url} &
 done
 
 # Setup servers
 for ((i=1; i<=numServer; i++)); do
     echo "Sending server to server${i}"
-    url="dmm6096@server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}:/users/dmm6096"
+    url="at6404@server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}:/users/at6404"
     scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null server ./configs/promtail-config.yml ${url} &
 done
 
-url="dmm6096@directory.${experimentName}.${projectName}.${clusterType}.${suffix}:/users/dmm6096"
+url="at6404@directory.${experimentName}.${projectName}.${clusterType}.${suffix}:/users/at6404"
 scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null directory ./configs/promtail-config.yml ${url} &
 
-url="dmm6096@monitoring.${experimentName}.${projectName}.${clusterType}.${suffix}:/users/dmm6096"
+url="at6404@monitoring.${experimentName}.${projectName}.${clusterType}.${suffix}:/users/at6404"
 scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ./configs/loki-config.yml ${url} &
 
 wait
 echo "All binary transfers are complete."
 
-directory_url="dmm6096@directory.${experimentName}.${projectName}.${clusterType}.${suffix}"
+
+sleep 1m
+
+
+directory_url="at6404@directory.${experimentName}.${projectName}.${clusterType}.${suffix}"
 
 # Start the directory first
 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${directory_url} << EOF
         # Commands to execute on the broker
-        cd /users/dmm6096
+        cd /users/at6404
         chmod +x directory
         ./directory > output.log 2>&1 &
         disown
         exit
 EOF
 
-monitoring_url="dmm6096@monitoring.${experimentName}.${projectName}.${clusterType}.${suffix}"
+monitoring_url="at6404@monitoring.${experimentName}.${projectName}.${clusterType}.${suffix}"
 # Start the directory first
-ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${directory_url} << EOF
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${monitoring_url} << EOF
         # Commands to execute on the broker
-        cd /users/dmm6096
-        nohup loki -config.file=loki-config.yml > /dev/null 2>&1 &
+        cd /users/at6404
+        nohup /usr/local/bin/loki -config.file=loki-config.yml > /dev/null 2>&1 &
         disown
         exit
 EOF
@@ -68,26 +72,26 @@ echo "Schedule Timestamp: $scheduleTimestamp, current Timestamp: $currTimestamp"
 
 # Loop over brokers and send multi-line SSH commands
 for ((i=1; i<=numBroker; i++)); do
-    broker_url="dmm6096@broker${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
+    broker_url="at6404@broker${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${broker_url} << EOF
         # Commands to execute on the broker
-        cd /users/dmm6096
+        cd /users/at6404
         chmod +x broker
         nohup promtail --config.file=promtail-config.yml > /dev/null 2>&1 &
-        nohup ./broker -directoryIP=${directory_url:8} -directoryPort 8080 -brokerIP=${broker_url:8} -brokerPort 8083 -startTimestamp ${scheduleTimestamp} -logFile ./logs/broker${i}.log > /dev/null 2>&1 &
+        nohup ./broker -directoryIP=${directory_url:7} -directoryPort 8080 -brokerIP=${broker_url:7} -brokerPort 8083 -startTimestamp ${scheduleTimestamp} -logFile ./logs/broker${i}.log > /dev/null 2>&1 &
         disown
         exit
 EOF
 done
 
 for ((i=1; i<=numServer; i++)); do
-    server_url="dmm6096@server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
+    server_url="at6404@server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${server_url} << EOF
         # Commands to execute on the broker
-        cd /users/dmm6096
+        cd /users/at6404
         chmod +x server
         nohup promtail --config.file=promtail-config.yml > /dev/null 2>&1 &
-        nohup ./server -directoryIP=${directory_url:8} -directoryPort 8080 -serverIP=${server_url:8} -serverPort 8083 -startTimestamp ${scheduleTimestamp} -logFile ./logs/server${i}.log > /dev/null 2>&1 &
+        nohup ./server -directoryIP=${directory_url:7} -directoryPort 8080 -serverIP=${server_url:7} -serverPort 8083 -startTimestamp ${scheduleTimestamp} -logFile ./logs/server${i}.log > /dev/null 2>&1 &
         disown
         exit
 EOF

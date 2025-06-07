@@ -8,11 +8,11 @@ rm server
 source ./env-vars.sh
 
 for ((i=1; i<=numBroker; i++)); do
-    broker_url="dmm6096@broker${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
+    broker_url="at6404@broker${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
     echo "Cleaning up broker${i} at ${broker_url}"
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${broker_url} << EOF
         # Commands to execute on the broker
-        cd /users/dmm6096
+        cd /users/at6404
         rm -rf logs
         sudo pkill -f broker
         sudo pkill -f promtail
@@ -27,11 +27,11 @@ EOF
 done
 
 for ((i=1; i<=numServer; i++)); do
-    server_url="dmm6096@server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
+    server_url="at6404@server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
     echo "Cleaning up server${i} at ${server_url}"
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${server_url} << EOF
         # Commands to execute on the broker
-        cd /users/dmm6096
+        cd /users/at6404
         sudo pkill -f server
         rm -f server output.log *.json *.yml
         rm -rf logs
@@ -46,10 +46,10 @@ EOF
     fi
 done
 
-directory_url="dmm6096@directory.${experimentName}.${projectName}.${clusterType}.${suffix}"
+directory_url="at6404@directory.${experimentName}.${projectName}.${clusterType}.${suffix}"
 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${directory_url} << EOF
         # Commands to execute on the broker
-        cd /users/dmm6096
+        cd /users/at6404
         sudo pkill -f directory
         rm -rf logs
         sudo pkill -f promtail

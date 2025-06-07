@@ -2,7 +2,7 @@
 
 numServer=2
 numBroker=2
-experimentName="alpha-test"
+experimentName="anand-test"
 clusterType="emulab"
 projectName="l-free-machine"
 
