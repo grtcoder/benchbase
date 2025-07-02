@@ -7,13 +7,13 @@ import (
 
 type StateValue struct {
 	State int
-	Pkg *Package 
+	Pkg   *Package
 }
 
-func (s *StateValue)  setState(state int){
-	s.State=state
+func (s *StateValue) setState(state int) {
+	s.State = state
 }
-func (s * StateValue) getState() int {
+func (s *StateValue) getState() int {
 	return s.State
 }
 func (s *StateValue) getPackage() *Package {
@@ -21,7 +21,7 @@ func (s *StateValue) getPackage() *Package {
 }
 
 type StateNode struct {
-	val *StateValue
+	val  *StateValue
 	next *StateNode
 }
 
@@ -50,11 +50,16 @@ type StateList struct {
 func (l *StateList) GetState() int {
 	return l.head.GetState()
 }
+
+//	func (l *StateList) GetHead() *StateNode {
+//		return l.head
+//	}
 func (l *StateList) GetHead() *StateNode {
-	return l.head
+	ptr := atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&l.head)))
+	return (*StateNode)(ptr)
 }
 
-func (l *StateList) UpdateState(currHead,newHead *StateNode) bool {
+func (l *StateList) UpdateState(currHead, newHead *StateNode) bool {
 	// set the next pointer of the new state to the current head
 	// in case of a successful swap. Otherswise, it does not matter
 	// since the newState is not part of the linked list.
@@ -64,14 +69,13 @@ func (l *StateList) UpdateState(currHead,newHead *StateNode) bool {
 	return atomic.CompareAndSwapPointer((*unsafe.Pointer)(unsafe.Pointer(&l.head)), unsafe.Pointer(currHead), unsafe.Pointer(newHead))
 }
 
-
 func NewStateList() *StateList {
-	ptr :=&StateList{
+	ptr := &StateList{
 		// Initialize the head node with a nil state and pkg value.
 		head: &StateNode{
 			val: &StateValue{
 				State: Undefined,
-				Pkg: nil,
+				Pkg:   nil,
 			},
 		},
 	}

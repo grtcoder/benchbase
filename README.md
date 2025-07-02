@@ -43,5 +43,5 @@ First run setup_monitoring.sh
 Then run_experiment.sh
 
 
-loki -config.file=loki-config.yaml
+loki -config.file=loki-config.yml
 

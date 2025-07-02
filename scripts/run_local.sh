@@ -3,6 +3,7 @@
 killall broker
 killall server
 killall directory
+killall storage_reader
 
 rm broker
 rm directory
@@ -17,6 +18,9 @@ mv directory.new directory
 go build -o server.new ../services/server/
 mv server.new server
 
+go build -o storage_reader.new ../services/storage_reader/
+mv storage_reader.new storage_reader
+
 source ./env-vars.sh
 read -p "After how long do you want to start ( in seconds )?: " startTime
 # Calculate 1 minute later
@@ -30,10 +34,16 @@ chmod +x directory
 
 sleep 2
 
+
+for ((i=1; i<=numServer; i++)); do
+        # Commands to execute on the broker
+        chmod +x storage_reader
+        ./storage_reader -directoryIP=localhost -directoryPort 8080 -serverIP=localhost -readerPort $((9090+${i})) -startTimestamp ${scheduleTimestamp} -logFile ./logs/storage_reader${i}.log &
+done
 for ((i=1; i<=numServer; i++)); do
         # Commands to execute on the broker
         chmod +x server
-        ./server -directoryIP=localhost -directoryPort 8080 -serverIP=localhost -serverPort $((9080+${i})) -startTimestamp ${scheduleTimestamp} -logFile ./logs/server${i}.log &
+        ./server -directoryIP=localhost -directoryPort 8080 -serverIP=localhost -serverPort $((9080+${i})) -readerPort $((9090+${i})) -startTimestamp ${scheduleTimestamp} -logFile ./logs/server${i}.log &
 done
 
 # Loop over brokers and send multi-line SSH commands

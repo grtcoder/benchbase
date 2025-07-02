@@ -13,26 +13,27 @@ import (
 )
 
 const (
-	BROADCAST_TIMEOUT=5*time.Millisecond
+	BROADCAST_TIMEOUT = 5 * time.Millisecond
 
-	EPOCH_PERIOD=500 * time.Millisecond
+	EPOCH_PERIOD = 500 * time.Millisecond
 
 	// We wait for 60% of the time for transactions. The rest of the transactions will be in the next package.
-	WAIT_FOR_BROKER_PACKAGE=(50*EPOCH_PERIOD)/100
-	BROKER_REQUEST_TIMEOUT=5*time.Millisecond
-	SERVER_REQUEST_TIMEOUT=5*time.Millisecond
-	BROKER_RETRY=5
-	SERVER_RETRY=5
+	WAIT_FOR_BROKER_PACKAGE = (50 * EPOCH_PERIOD) / 100
+	BROKER_REQUEST_TIMEOUT  = 5 * time.Millisecond
+	SERVER_REQUEST_TIMEOUT  = 5 * time.Millisecond
+	BROKER_RETRY            = 5
+	SERVER_RETRY            = 5
 )
 
 type NodeInfo struct {
-	IP string `json:"ip"`
-	Port int64 `json:"port"`
+	IP         string `json:"ip"`
+	Port       int64  `json:"port"`
+	ReaderPort int64  `json:"readerport"` //same as port for broker -> just make it redundant
 }
 
 type DirectoryMap struct {
-	Data map[int]*NodeInfo `json:"data"`
-	Version int `json:"version"`
+	Data    map[int]*NodeInfo `json:"data"`
+	Version int               `json:"version"`
 	sync.RWMutex
 }
 
@@ -40,7 +41,6 @@ type NodesMap struct {
 	ServerMap *DirectoryMap `json:"serverMap"`
 	BrokerMap *DirectoryMap `json:"brokerMap"`
 }
-
 
 func (n *NodesMap) checkAndUpdateServerMap(newServerMap *DirectoryMap) {
 	n.ServerMap.Lock()
@@ -64,23 +64,22 @@ func (n *NodesMap) CheckAndUpdateMap(newDirectoryMap *NodesMap) {
 }
 
 type Operation struct {
-	Timestamp int64 `json:"timestamp"`
-	Key string `json:"key"`	
-	Value string `json:"value"`
-	Op int64 `json:"op"`
+	Timestamp int64  `json:"timestamp"`
+	Key       string `json:"key"`
+	Value     string `json:"value"`
+	Op        int64  `json:"op"`
 }
 
 type Transaction struct {
 	Operations []*Operation `json:"operations"`
 }
 
-
 // Declare constants for state of the package for an epoch.
 const (
-	Undefined  int = 1
+	Undefined    int = 1
 	NotReceived  int = 2
-	Received  int = 3
-	IgnoreBroker int  = 4
+	Received     int = 3
+	IgnoreBroker int = 4
 )
 
 // Declare constants for the type of the node.
@@ -101,12 +100,12 @@ func GetNodeType(nodeType int) string {
 }
 
 type Package struct {
-	BrokerID int `json:"brokerID"`
-	PackageID int `json:"packageID"`
+	BrokerID     int            `json:"brokerID"`
+	PackageID    int            `json:"packageID"`
 	Transactions []*Transaction `json:"transactions"`
 }
 
-func DummyTransactions () []*Transaction {
+func DummyTransactions() []*Transaction {
 	// Create a dummy transaction with some operations
 	operations := []*Operation{
 		{Timestamp: 1, Key: "key1", Value: "value1", Op: 1},
@@ -117,30 +116,28 @@ func DummyTransactions () []*Transaction {
 	}
 }
 
-
-
-func (m *DirectoryMap) Get(key int) (*NodeInfo,bool) {
+func (m *DirectoryMap) Get(key int) (*NodeInfo, bool) {
 	m.RLock()
 	defer m.RUnlock()
 	val, ok := m.Data[key]
-	return val,ok
+	return val, ok
 }
 
 func (m *DirectoryMap) SetVersion(version int) {
-	m.Version=version
+	m.Version = version
 }
 
 func (m *DirectoryMap) Set(key int, value *NodeInfo) {
 	m.Data[key] = value
 }
 
-func HandleUpdateDirectory(logger *zap.Logger,directoryInfo *NodesMap) func(w http.ResponseWriter, r *http.Request) {
-	return func (w http.ResponseWriter, r *http.Request) {
+func HandleUpdateDirectory(logger *zap.Logger, directoryInfo *NodesMap) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
 		// Read data from request
 		nodeType := r.Header.Get("X-NodeType")
 		nodeID := r.Header.Get("X-NodeID")
 		if nodeType == "" || nodeID == "" {
-			nodeType="unknown"
+			nodeType = "unknown"
 			nodeID = "unknown"
 		}
 		logger.Info("Received update directory request", zap.String("nodeType", nodeType), zap.String("nodeID", nodeID))
@@ -165,7 +162,7 @@ func HandleUpdateDirectory(logger *zap.Logger,directoryInfo *NodesMap) func(w ht
 	}
 }
 
-func BroadcastNodesInfo(logger *zap.Logger,currNodeID int, currNodeType int,directoryInfo *NodesMap) error {
+func BroadcastNodesInfo(logger *zap.Logger, currNodeID int, currNodeType int, directoryInfo *NodesMap) error {
 	var wg sync.WaitGroup
 	jsonData, err := json.Marshal(directoryInfo)
 	if err != nil {
@@ -178,10 +175,10 @@ func BroadcastNodesInfo(logger *zap.Logger,currNodeID int, currNodeType int,dire
 			continue
 		}
 
-		logger.Info("Sending broadcast request to broker", zap.Int("id", id), zap.String("ip", node.IP), zap.Int64("port", node.Port))
+		logger.Info("Sending broadcast request to broker", zap.Int("id", id), zap.String("ip", node.IP), zap.Int64("port", node.Port), zap.Int64("readerport", node.ReaderPort))
 
 		wg.Add(1)
-		go func(id,currNodeID int, node *NodeInfo) {
+		go func(id, currNodeID int, node *NodeInfo) {
 			defer wg.Done()
 
 			client := &http.Client{
@@ -203,11 +200,11 @@ func BroadcastNodesInfo(logger *zap.Logger,currNodeID int, currNodeType int,dire
 				logger.Error("Error sending request to broker", zap.Int("id", id), zap.Error(err))
 				return
 			}
-
+			defer resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
 				logger.Error("Unexpected status code", zap.Int("status_code", resp.StatusCode), zap.Int("broker_id", id))
 			}
-		}(id,currNodeID, node)
+		}(id, currNodeID, node)
 	}
 
 	for id, node := range directoryInfo.ServerMap.Data {
@@ -215,7 +212,7 @@ func BroadcastNodesInfo(logger *zap.Logger,currNodeID int, currNodeType int,dire
 			continue
 		}
 
-		logger.Info("Sending broadcast request to server", zap.Int("id", id), zap.String("ip", node.IP), zap.Int64("port", node.Port))
+		logger.Info("Sending broadcast request to server", zap.Int("id", id), zap.String("ip", node.IP), zap.Int64("port", node.Port), zap.Int64("readerport", node.ReaderPort))
 
 		wg.Add(1)
 		go func(id int, node *NodeInfo) {
@@ -225,7 +222,7 @@ func BroadcastNodesInfo(logger *zap.Logger,currNodeID int, currNodeType int,dire
 				Timeout: BROADCAST_TIMEOUT,
 			}
 
-			req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, BROKER_UPDATE_DIRECTORY), bytes.NewBuffer(jsonData))
+			req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, SERVER_UPDATE_DIRECTORY), bytes.NewBuffer(jsonData))
 			if err != nil {
 				// Handle error
 				logger.Warn("Error creating request", zap.Int("id", id), zap.Error(err))
@@ -242,7 +239,7 @@ func BroadcastNodesInfo(logger *zap.Logger,currNodeID int, currNodeType int,dire
 				logger.Warn("Error sending request to server", zap.Int("id", id), zap.Error(err))
 				return
 			}
-
+			defer resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
 				logger.Warn("Unexpected status code", zap.Int("status_code", resp.StatusCode), zap.Int("server_id", id))
 			}
@@ -254,4 +251,3 @@ func BroadcastNodesInfo(logger *zap.Logger,currNodeID int, currNodeType int,dire
 	logger.Info("Broadcasting nodes info complete", zap.Int("currNodeID", currNodeID), zap.Int("currNodeType", currNodeType))
 	return nil
 }
-

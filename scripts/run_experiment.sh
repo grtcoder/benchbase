@@ -12,6 +12,9 @@ mv directory.new directory
 GOOS=linux GOARCH=amd64 go build -o server.new ../services/server/
 mv server.new server
 
+GOOS=linux GOARCH=amd64 go build -o storage_reader.new ../services/storage_reader/
+mv storage_reader.new storage_reader
+
 source ./env-vars.sh
 
 # Setup monitoring
@@ -25,7 +28,7 @@ done
 for ((i=1; i<=numServer; i++)); do
     echo "Sending server to server${i}"
     url="at6404@server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}:/users/at6404"
-    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null server ./configs/promtail-config.yml ${url} &
+    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null server storage_reader ./configs/promtail-config.yml ${url} &
 done
 
 url="at6404@directory.${experimentName}.${projectName}.${clusterType}.${suffix}:/users/at6404"
@@ -90,9 +93,24 @@ for ((i=1; i<=numServer; i++)); do
         # Commands to execute on the broker
         cd /users/at6404
         chmod +x server
+        chmod +x storage_reader
         nohup promtail --config.file=promtail-config.yml > /dev/null 2>&1 &
-        nohup ./server -directoryIP=${directory_url:7} -directoryPort 8080 -serverIP=${server_url:7} -serverPort 8083 -startTimestamp ${scheduleTimestamp} -logFile ./logs/server${i}.log > /dev/null 2>&1 &
-        disown
+        nohup ./server -directoryIP=${directory_url:7} -directoryPort 8080 -serverIP=${server_url:7} -serverPort 8083 -readerPort 9085 -startTimestamp ${scheduleTimestamp} -logFile ./logs/server${i}.log > /dev/null 2>&1 &
+        nohup ./storage_reader -directoryIP=${directory_url:7} -directoryPort 8080 -serverIP=${server_url:7} -readerPort 9085 -startTimestamp ${scheduleTimestamp} -logFile ./logs/storage_reader${i}.log > /dev/null 2>&1 &
+        disown -a
         exit
 EOF
 done
+
+# for ((i=1; i<=numServer; i++)); do
+#     server_url="at6404@server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
+#     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${server_url} << EOF
+#         # Commands to execute on the broker
+#         cd /users/at6404
+#         chmod +x storage_reader
+#         # nohup promtail --config.file=promtail-config.yml > /dev/null 2>&1 &
+#         nohup ./storage_reader -directoryIP=${directory_url:7} -directoryPort 8080 -serverIP=${server_url:7} -readerPort 9083 -startTimestamp ${scheduleTimestamp} -logFile ./logs/storage_reader${i}.log > /dev/null 2>&1 &
+#         disown
+#         exit
+# EOF
+# done

@@ -15,8 +15,6 @@ import (
 	"github.com/gorilla/mux"
 )
 
-
-
 var nodesInfo *commons.NodesMap
 
 // This will also serve as the version of the broker information.
@@ -29,7 +27,7 @@ func registerBroker(w http.ResponseWriter, r *http.Request) {
 	// Read the JSON body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("error while reading request body, error: %s",err)
+		log.Printf("error while reading request body, error: %s", err)
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
@@ -37,22 +35,23 @@ func registerBroker(w http.ResponseWriter, r *http.Request) {
 
 	brokerInfo := nodesInfo.BrokerMap
 	brokerInfo.Lock()
+	defer brokerInfo.Unlock()
 	latestBrokerID++
 	brokerID := latestBrokerID
 
-	currBroker:=&commons.NodeInfo{}
-	if err=json.Unmarshal(body,&currBroker);err!=nil {
-		log.Printf("error while unmarshalling broker info, error: %s",err)
+	currBroker := &commons.NodeInfo{}
+	if err = json.Unmarshal(body, &currBroker); err != nil {
+		log.Printf("error while unmarshalling broker info, error: %s", err)
 		http.Error(w, "Invalid JSON sent by broker", http.StatusBadRequest)
 		return
 	}
 
 	brokerInfo.Set(brokerID, currBroker)
 	brokerInfo.SetVersion(brokerID)
+	log.Printf("latest broker version: %d", brokerInfo.Version)
+	// brokerInfo.Unlock()
 
-	brokerInfo.Unlock()
-
-	log.Printf("Broker registered with ID: %d",brokerID)
+	log.Printf("Broker registered with ID: %d", brokerID)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -68,43 +67,43 @@ func registerServer(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close() // Close body after reading
 
-
 	serverInfo := nodesInfo.ServerMap
 	serverInfo.Lock()
+	defer serverInfo.Unlock()
 	latestServerID++
 	serverID := latestServerID
 
-	currServer:=&commons.NodeInfo{}
-	if err=json.Unmarshal(body,&currServer);err!=nil {
-		log.Printf("error while unmarshalling server info, error: %s",err)
+	currServer := &commons.NodeInfo{}
+	if err = json.Unmarshal(body, &currServer); err != nil {
+		log.Printf("error while unmarshalling server info, error: %s", err)
 		http.Error(w, "Invalid JSON sent by server", http.StatusBadRequest)
 		return
 	}
 
-	serverInfo.Set(serverID,currServer)
+	serverInfo.Set(serverID, currServer)
 	serverInfo.SetVersion(serverID)
+	log.Printf("latest server version: %d", serverInfo.Version)
+	//serverInfo.Unlock()
 
-	serverInfo.Unlock()
-
-	log.Printf("Server registered with ID: %d",serverID)
+	log.Printf("Server registered with ID: %d", serverID)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(nodesInfo)
 }
 
-func main(){
+func main() {
 	// Initialize the broker and server counter to 0.
 	latestBrokerID = 0
 	latestServerID = 0
 
 	nodesInfo = &commons.NodesMap{
 		ServerMap: &commons.DirectoryMap{
-			Data: make(map[int]*commons.NodeInfo),
+			Data:    make(map[int]*commons.NodeInfo),
 			Version: 0,
 		},
 		BrokerMap: &commons.DirectoryMap{
-			Data: make(map[int]*commons.NodeInfo),
+			Data:    make(map[int]*commons.NodeInfo),
 			Version: 0,
 		},
 	}
