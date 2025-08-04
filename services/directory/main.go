@@ -92,6 +92,50 @@ func registerServer(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(nodesInfo)
 }
 
+// assume nodesInfo is your global *commons.NodesMap
+// and directory removal only affects the ServerMap
+func deRegisterServer(w http.ResponseWriter, r *http.Request) {
+	// 1. Read the JSON body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	// 2. Unmarshal just the ID
+	var req struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		log.Printf("error unmarshalling removeServer payload: %v", err)
+		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		return
+	}
+	serverID := req.ID
+
+	// 2. Lock the ServerMap
+	serverMap := nodesInfo.ServerMap
+	serverMap.Lock()
+	defer serverMap.Unlock()
+
+	// 3. If present, delete and bump version
+	if _, exists := serverMap.Data[serverID]; exists {
+		delete(serverMap.Data, serverID)
+		latestServerID++
+		newVersionNo := latestServerID
+		serverMap.SetVersion(newVersionNo)
+		log.Printf("Server %d removed; new version: %d", serverID, serverMap.Version)
+	} else {
+		log.Printf("Server %d not found; version remains: %d", serverID, serverMap.Version)
+	}
+
+	// 4. Return the updated nodesInfo
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(nodesInfo)
+}
+
 func main() {
 	// Initialize the broker and server counter to 0.
 	latestBrokerID = 0
@@ -111,6 +155,8 @@ func main() {
 	r := mux.NewRouter()
 	r.HandleFunc(commons.DIRECTORY_REGISTER_BROKER, registerBroker)
 	r.HandleFunc(commons.DIRECTORY_REGISTER_SERVER, registerServer)
+	//r.HandleFunc(commons.DIRECTORY_REGISTER_BROKER, registerBroker)
+	r.HandleFunc(commons.DIRECTORY_REMOVE_SERVER, deRegisterServer)
 
 	// Graceful shutdown handling
 	server := &http.Server{

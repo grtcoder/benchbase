@@ -4,14 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"lockfreemachine/src/pkg/commons"
+	"math/rand"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Workiva/go-datastructures/queue"
@@ -30,7 +36,7 @@ var (
 	httpRequests    *prometheus.CounterVec
 	requestDuration *prometheus.HistogramVec
 	apiCallDuration *prometheus.HistogramVec
-	setupTime       *prometheus.GaugeVec
+	//setupTime       *prometheus.GaugeVec
 )
 
 func initMetrics(brokerID int) {
@@ -67,18 +73,18 @@ func initMetrics(brokerID int) {
 		[]string{"method", "targetID"},
 	)
 
-	setupTime = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "setup_time",
-			Help: "Time taken to set up the broker",
-		},
-		[]string{},
-	)
+	// setupTime = prometheus.NewGaugeVec(
+	// 	prometheus.GaugeOpts{
+	// 		Name: "setup_time",
+	// 		Help: "Time taken to set up the broker",
+	// 	},
+	// 	[]string{},
+	// )
 
 	wrappedRegisterer.MustRegister(httpRequests)
 	wrappedRegisterer.MustRegister(requestDuration)
 	wrappedRegisterer.MustRegister(apiCallDuration)
-	wrappedRegisterer.MustRegister(setupTime)
+	//wrappedRegisterer.MustRegister(setupTime)
 }
 
 const (
@@ -96,11 +102,19 @@ type Broker struct {
 	DirectoryInfo    *commons.NodesMap
 	httpServer       *http.Server
 	isTest           bool
+	dropRate         float64 // Used to randomly drop packages received
 }
 
 // Middleware to measure duration with dynamic labels
-func MetricsMiddleware(next http.Handler) http.Handler {
+func (b *Broker) MetricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rand.Float64() < b.dropRate {
+			// increment a “dropped” metric if you want:
+			httpRequests.WithLabelValues(r.URL.Path, r.Method).Inc()
+			http.Error(w, "simulated network failure", http.StatusServiceUnavailable)
+			return
+		}
+
 		nodeID := r.Header.Get("X-NodeID")     // Grab dynamic tenant ID from headers
 		nodeType := r.Header.Get("X-NodeType") // Grab dynamic tenant ID from headers
 		if nodeID == "" {
@@ -108,6 +122,12 @@ func MetricsMiddleware(next http.Handler) http.Handler {
 			nodeType = "unknown"
 		}
 
+		// if r.URL.Path == "/metrics" {
+		// 	// skip
+		// 	promhttp.Handler().ServeHTTP(w, r)
+		// 	return
+		// }
+		httpRequests.WithLabelValues(r.URL.Path, r.Method).Inc()
 		start := time.Now()
 
 		// Serve the real handler
@@ -120,7 +140,25 @@ func MetricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func NewBroker(id int, ip string, port int, directoryIP string, directoryPort int, isTest bool) (*Broker, error) {
+func makeInstrumentedClient(targetID string) *http.Client {
+	// Curry the targetID label, leaving method to be filled per-request
+	curried := apiCallDuration.MustCurryWith(prometheus.Labels{
+		"targetID": targetID,
+	})
+
+	// Wrap the default transport
+	instrumentedTransport := promhttp.InstrumentRoundTripperDuration(
+		curried,               // ObserverVec for apiCallDuration
+		http.DefaultTransport, // underlying RoundTripper
+	)
+
+	return &http.Client{
+		Transport: instrumentedTransport,
+		Timeout:   commons.BROKER_REQUEST_TIMEOUT,
+	}
+}
+
+func NewBroker(id int, ip string, port int, directoryIP string, directoryPort int, isTest bool, dropRate float64) (*Broker, error) {
 	transactionQueue := queue.NewRingBuffer(BUFFER_SIZE)
 	directoryAddr := fmt.Sprintf("http://%s:%d", directoryIP, directoryPort)
 	directoryInfo := &commons.NodesMap{
@@ -137,6 +175,7 @@ func NewBroker(id int, ip string, port int, directoryIP string, directoryPort in
 		DirectoryAddr:    directoryAddr,
 		DirectoryInfo:    directoryInfo,
 		isTest:           isTest,
+		dropRate:         dropRate,
 	}
 
 	if err := broker.register(); err != nil {
@@ -148,13 +187,13 @@ func NewBroker(id int, ip string, port int, directoryIP string, directoryPort in
 	}
 
 	r := mux.NewRouter()
-	r.Use(MetricsMiddleware)
+	r.Use(broker.MetricsMiddleware)
 
 	r.HandleFunc(commons.BROKER_UPDATE_DIRECTORY, commons.HandleUpdateDirectory(logger, broker.DirectoryInfo)).Methods("POST")
 	r.HandleFunc(commons.BROKER_TRANSACTION, broker.handleTransactionRequest).Methods("POST")
 
 	// Prometheus metrics
-	initMetrics(id)
+	initMetrics(broker.ID)
 	r.Path("/metrics").Handler(promhttp.Handler())
 
 	broker.httpServer = &http.Server{
@@ -163,6 +202,45 @@ func NewBroker(id int, ip string, port int, directoryIP string, directoryPort in
 	}
 
 	return broker, nil
+}
+
+func (b *Broker) delete_server(ServerID int) error {
+	data := map[string]interface{}{
+		"id": ServerID,
+	}
+
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		logger.Error("Error marshalling JSON", zap.Error(err))
+		return fmt.Errorf("error encoding JSON: %v", err)
+	}
+
+	resp, err := http.Post(fmt.Sprintf("%s%s", b.DirectoryAddr, commons.DIRECTORY_REMOVE_SERVER), "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		logger.Error("Error sending request to directory", zap.Error(err))
+		return fmt.Errorf("error sending request to directory: %v, could not delete server entry", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		logger.Error("Unexpected status code from directory", zap.Int("statusCode", resp.StatusCode))
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+
+	newDirectoryMap := &commons.NodesMap{}
+	if err := json.Unmarshal(body, &newDirectoryMap); err != nil {
+		logger.Error("Error unmarshalling JSON", zap.Error(err))
+	}
+	ndm := newDirectoryMap
+	go func(m *commons.NodesMap) {
+		b.DirectoryInfo.CheckAndUpdateMap(m)
+	}(ndm)
+	logger.Info("Directory info received", zap.Any("directoryInfo", b.DirectoryInfo))
+
+	logger.Info("Server Removed", zap.Int("serverID", ServerID))
+	return nil
 }
 
 func (b *Broker) register() error {
@@ -222,12 +300,92 @@ func (b *Broker) handleTransactionRequest(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusOK)
 }
 
+// // helper to spot “connection refused” anywhere in the chain
+// func isConnRefused(err error) bool {
+// 	var opErr *net.OpError
+// 	if !errors.As(err, &opErr) {
+// 		return false
+// 	}
+// 	// opErr.Err might itself wrap a SyscallError
+// 	return errors.Is(opErr.Err, syscall.ECONNREFUSED)
+// }
+
+// isConnRefused returns true if err or any wrapped error is ECONNREFUSED.
+// func isConnRefused(err error) bool {
+// 	// 1) If it's a *url.Error, extract its inner Err
+// 	logger.Info("connref1", zap.Error(err))
+// 	var uerr *url.Error
+// 	if errors.As(err, &uerr) {
+// 		err = uerr.Err
+// 	}
+// 	logger.Info("connref2", zap.Error(err))
+
+// 	// 2) Check directly for syscall.ECONNREFUSED anywhere in the chain
+// 	if errors.Is(err, syscall.ECONNREFUSED) {
+// 		return true
+// 	}
+
+// 	// 3) As a fallback, look for a *net.OpError whose Err is ECONNREFUSED
+// 	var opErr *net.OpError
+// 	if errors.As(err, &opErr) {
+// 		return errors.Is(opErr.Err, syscall.ECONNREFUSED)
+// 	}
+
+// 	return false
+// }
+
+// isConnRefused returns true if err or any wrapped error is ECONNREFUSED.
+func isConnRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// 1) Unwrap url.Error
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		err = uerr.Err
+	}
+
+	// 2) Unwrap net.OpError
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		err = opErr.Err
+	}
+
+	// 3) Unwrap os.SyscallError
+	var sysErr *os.SyscallError
+	if errors.As(err, &sysErr) {
+		// The inner Err here *should* be a syscall.Errno
+		if errno, ok := sysErr.Err.(syscall.Errno); ok && errno == syscall.ECONNREFUSED {
+			return true
+		}
+		logger.Info("connref1", zap.Error(err))
+		// If not, fall back to the unwrapped Err
+		err = sysErr.Err
+	}
+
+	// 4) Direct Errno check
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		logger.Info("connref2", zap.Error(err))
+		return true
+	}
+
+	// 5) Last‑ditch: substring match on the error string
+	if strings.Contains(err.Error(), "connection refused") {
+		logger.Info("connref3", zap.Error(err))
+		return true
+	}
+
+	return false
+}
+
 func (b *Broker) sendPackage(serverURL string, jsonData []byte) func() error {
 	return func() error {
 		// Create an HTTP client with a per-request timeout
-		client := &http.Client{
-			Timeout: commons.BROKER_REQUEST_TIMEOUT,
-		}
+		// client := &http.Client{
+		// 	Timeout: commons.BROKER_REQUEST_TIMEOUT,
+		// }
+		client := makeInstrumentedClient("send-package")
 
 		req, err := http.NewRequest("POST", serverURL, bytes.NewBuffer(jsonData))
 		if err != nil {
@@ -303,16 +461,42 @@ func (b *Broker) protocolDaemon(nextRun time.Time) {
 				}
 
 				logger.Info("Sending package to server", zap.Int("serverID", serverID), zap.String("ip", node.IP), zap.Int64("port", node.Port))
-
-				retry.Do(
-					b.sendPackage(fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, commons.SERVER_ADD_PACKAGE), jsonData),
+				url := fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, commons.SERVER_ADD_PACKAGE)
+				err := retry.Do(
+					b.sendPackage(url, jsonData),
 					retry.Attempts(commons.BROKER_RETRY), // Number of retry attempts
 					retry.Delay(0),                       // No delay
 					retry.DelayType(retry.FixedDelay),    // Use fixed delay strategy
+					retry.RetryIf(func(err error) bool {
+						return !isConnRefused(err)
+					}),
 					retry.OnRetry(func(n uint, err error) {
 						logger.Warn("Retrying package send", zap.Int("serverID", serverID), zap.Int("attempt", int(n)), zap.Error(err))
 					}),
 				)
+
+				if err != nil {
+					// final failure after retries
+					if isConnRefused(err) {
+						logger.Error("Server appears down, removing from pool",
+							zap.Int("serverID", serverID),
+							zap.String("url", url),
+							zap.Error(err),
+						)
+						// deregister server
+						go func(m int) {
+							b.delete_server(m)
+						}(serverID)
+
+					} else {
+						logger.Error("Failed to send package after retries",
+							zap.Int("serverID", serverID),
+							zap.String("url", url),
+							zap.Error(err),
+						)
+					}
+				}
+
 			}(serverID, node)
 		}
 
@@ -406,6 +590,10 @@ func main() {
 	var startTimestamp int64
 	flag.Int64Var(&startTimestamp, "startTimestamp", 0, "Start timestamp")
 
+	var dropRate float64
+	flag.Float64Var(&dropRate, "dropRate", 0, "drop rate")
+	rand.Seed(time.Now().UnixNano())
+
 	isTest := flag.Bool("test", false, "Run in test mode")
 	flag.Parse()
 
@@ -462,7 +650,7 @@ func main() {
 
 	defer logger.Sync()
 
-	broker, err := NewBroker(0, brokerIP, brokerPort, directoryIP, directoryPort, *isTest)
+	broker, err := NewBroker(0, brokerIP, brokerPort, directoryIP, directoryPort, *isTest, dropRate)
 	if err != nil {
 		logger.Error("Error setting up broker", zap.Error(err))
 		return

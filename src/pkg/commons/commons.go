@@ -15,7 +15,7 @@ import (
 const (
 	BROADCAST_TIMEOUT = 5 * time.Millisecond
 
-	EPOCH_PERIOD = 500 * time.Millisecond
+	EPOCH_PERIOD = 100 * time.Millisecond
 
 	// We wait for 60% of the time for transactions. The rest of the transactions will be in the next package.
 	WAIT_FOR_BROKER_PACKAGE = (50 * EPOCH_PERIOD) / 100
@@ -156,7 +156,14 @@ func HandleUpdateDirectory(logger *zap.Logger, directoryInfo *NodesMap) func(w h
 			return
 		}
 
-		directoryInfo.CheckAndUpdateMap(newDirectoryMap)
+		// //directoryInfo.CheckAndUpdateMap(newDirectoryMap)
+		// go func() {
+		// 	directoryInfo.CheckAndUpdateMap(newDirectoryMap)
+		// }()
+		ndm := newDirectoryMap
+		go func(m *NodesMap) {
+			directoryInfo.CheckAndUpdateMap(m)
+		}(ndm)
 
 		w.WriteHeader(http.StatusOK)
 	}

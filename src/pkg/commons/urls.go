@@ -4,6 +4,7 @@ const (
 	// Directory endpoints
 	DIRECTORY_REGISTER_BROKER = "/registerBroker"
 	DIRECTORY_REGISTER_SERVER = "/registerServer"
+	DIRECTORY_REMOVE_SERVER   = "/deRegisterServer"
 
 	// Broker endpoints
 	BROKER_TRANSACTION      = "/addTransaction"

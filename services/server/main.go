@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"lockfreemachine/src/pkg/commons"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -19,6 +20,8 @@ import (
 	"github.com/Workiva/go-datastructures/queue"
 	"github.com/avast/retry-go"
 	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -34,6 +37,145 @@ const (
 	// Maximum number of packages the write channel can hold.
 	WRITE_BUFFER_SIZE = 100
 )
+
+var (
+	httpRequests     *prometheus.CounterVec
+	requestDuration  *prometheus.HistogramVec
+	apiCallDuration  *prometheus.HistogramVec
+	epochNumber      *prometheus.GaugeVec
+	protocolDuration *prometheus.HistogramVec
+	epochDuration    *prometheus.GaugeVec
+)
+
+func initMetrics(serverID int) {
+
+	// Create a wrapped Registerer that injects labels
+	wrappedRegisterer := prometheus.WrapRegistererWith(
+		prometheus.Labels{"serverID": fmt.Sprint(serverID)}, // <- static label here
+		prometheus.DefaultRegisterer,
+	)
+
+	httpRequests = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_total",
+			Help: "Count of all HTTP requests grouped by endpoint",
+		},
+		[]string{"path", "method"},
+	)
+
+	requestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "api_request_duration_milliseconds",
+			Help:    "Duration of API requests in milliseconds",
+			Buckets: prometheus.DefBuckets, // You can customize this
+		},
+		[]string{"path", "method", "srcID", "srcType"}, // group by endpoint/method if you want
+	)
+
+	apiCallDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "outbound_api_call_duration_seconds",
+			Help:    "Duration of outbound API calls in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "targetID"},
+	)
+
+	// setupTime = prometheus.NewGaugeVec(
+	// 	prometheus.GaugeOpts{
+	// 		Name: "setup_time",
+	// 		Help: "Time taken to set up the broker",
+	// 	},
+	// 	[]string{},
+	// )
+
+	epochNumber = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "protocol_current_epoch",
+			Help: "Which epoch the protocol daemon is on",
+		},
+		[]string{}, // no extra labels
+	)
+
+	// 2) Histogram for each run’s duration
+	protocolDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "protocol_epoch_duration_seconds",
+			Help:    "Duration of a single protocol epoch run",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{}, // no extra labels
+	)
+
+	epochDuration = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "protocol_epoch_duration_in_seconds",
+			Help: "Wall clock seconds taken by each protocol epoch run",
+		},
+		[]string{"epoch"},
+	)
+
+	wrappedRegisterer.MustRegister(httpRequests)
+	wrappedRegisterer.MustRegister(requestDuration)
+	wrappedRegisterer.MustRegister(apiCallDuration)
+	wrappedRegisterer.MustRegister(epochNumber)
+	wrappedRegisterer.MustRegister(protocolDuration)
+	wrappedRegisterer.MustRegister(epochDuration)
+
+}
+
+// Middleware to measure duration with dynamic labels
+func (s *Server) MetricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rand.Float64() < s.dropRate {
+			// increment a “dropped” metric if you want:
+			httpRequests.WithLabelValues(r.URL.Path, r.Method).Inc()
+			http.Error(w, "simulated network failure", http.StatusServiceUnavailable)
+			return
+		}
+
+		nodeID := r.Header.Get("X-NodeID")     // Grab dynamic tenant ID from headers
+		nodeType := r.Header.Get("X-NodeType") // Grab dynamic tenant ID from headers
+		if nodeID == "" {
+			nodeID = "unknown"
+			nodeType = "unknown"
+		}
+
+		// if r.URL.Path == "/metrics" {
+		// 	// skip
+		// 	promhttp.Handler().ServeHTTP(w, r)
+		// 	return
+		// }
+		httpRequests.WithLabelValues(r.URL.Path, r.Method).Inc()
+		start := time.Now()
+
+		// Serve the real handler
+		next.ServeHTTP(w, r)
+
+		duration := time.Since(start).Seconds()
+
+		// Record with dynamic label
+		requestDuration.WithLabelValues(r.URL.Path, r.Method, nodeID, nodeType).Observe(duration)
+	})
+}
+
+func makeInstrumentedClient(targetID string) *http.Client {
+	// Curry the targetID label, leaving method to be filled per-request
+	curried := apiCallDuration.MustCurryWith(prometheus.Labels{
+		"targetID": targetID,
+	})
+
+	// Wrap the default transport
+	instrumentedTransport := promhttp.InstrumentRoundTripperDuration(
+		curried,               // ObserverVec for apiCallDuration
+		http.DefaultTransport, // underlying RoundTripper
+	)
+
+	return &http.Client{
+		Transport: instrumentedTransport,
+		Timeout:   commons.SERVER_REQUEST_TIMEOUT,
+	}
+}
 
 // writeToFile is a goroutine that writes packages to files.
 func (s *Server) writeToFile() {
@@ -84,14 +226,16 @@ type Server struct {
 	writeChan      chan *commons.Package      // Channel to write packages to files
 	answer         map[int]*commons.StateList // Map of broker IDs to their states
 	packageArray   *queue.RingBuffer          // Array to hold packages
+	dropRate       float64                    // api requests
 }
 
 // requestPackage sends a request to the server to get a package.
 func (s *Server) requestPackage(serverURL string, brokerID int, pkg *commons.Package) func() error {
 	return func() error {
-		client := &http.Client{
-			Timeout: commons.SERVER_REQUEST_TIMEOUT,
-		}
+		// client := &http.Client{
+		// 	Timeout: commons.SERVER_REQUEST_TIMEOUT,
+		// }
+		client := makeInstrumentedClient("request-package")
 
 		// Create a new HTTP request to request package
 		req, err := http.NewRequest("GET", fmt.Sprintf("%s?brokerID=%d", serverURL, brokerID), nil)
@@ -138,9 +282,10 @@ func (s *Server) requestPackage(serverURL string, brokerID int, pkg *commons.Pac
 
 func (s *Server) requestPackageFromStorage(serverURL string, brokerID int, packageID int, pkg *commons.Package) func() error {
 	return func() error {
-		client := &http.Client{
-			Timeout: commons.SERVER_REQUEST_TIMEOUT,
-		}
+		// client := &http.Client{
+		// 	Timeout: commons.SERVER_REQUEST_TIMEOUT,
+		// }
+		client := makeInstrumentedClient("request-package-storage")
 
 		// Create a new HTTP request to request package
 		req, err := http.NewRequest("GET", fmt.Sprintf("%s?brokerID=%d&packageID=%d", serverURL, brokerID, packageID), nil)
@@ -188,11 +333,12 @@ func (s *Server) requestPackageFromStorage(serverURL string, brokerID int, packa
 func (s *Server) sendPackage(serverURL string, jsonData []byte) func() error {
 	return func() error {
 		// Create an HTTP client with a per-request timeout
-		client := &http.Client{
+		// client := &http.Client{
 
-			// TODO: Change it to another configurable value.
-			Timeout: commons.SERVER_REQUEST_TIMEOUT,
-		}
+		// 	// TODO: Change it to another configurable value.
+		// 	Timeout: commons.SERVER_REQUEST_TIMEOUT,
+		// }
+		client := makeInstrumentedClient("server-send-package")
 
 		req, err := http.NewRequest("POST", serverURL, bytes.NewBuffer(jsonData))
 		if err != nil {
@@ -330,28 +476,12 @@ func (s *Server) writePackage(pkg *commons.Package) error {
 	return nil
 }
 
-// func (s *Server) readPackage(brokerID, packageID int) (*commons.Package, error) {
-// 	// Write to file
-// 	jsonData, err := os.ReadFile(fmt.Sprintf("./packages_%d/pkg_%d_%d.json", s.serverID, brokerID, packageID))
-// 	if err != nil {
-// 		logger.Error("Failed to read file", zap.String("filePath", fmt.Sprintf("./packages_%d/pkg_%d_%d.json", s.serverID, brokerID, packageID)), zap.Error(err))
-// 		return nil, fmt.Errorf("error reading file: %s", err)
-// 	}
-
-// 	// Encode package to JSON
-// 	pkg := &commons.Package{}
-// 	if err := json.Unmarshal(jsonData, pkg); err != nil {
-// 		logger.Error("Failed to decode JSON", zap.String("filePath", fmt.Sprintf("./packages_%d/pkg_%d_%d.json", s.serverID, brokerID, packageID)), zap.Error(err))
-// 		return nil, fmt.Errorf("error decoding JSON: %s", err)
-// 	}
-
-// 	logger.Info("Package read from file", zap.String("filePath", fmt.Sprintf("./packages_%d/pkg_%d_%d.json", s.serverID, brokerID, packageID)), zap.Any("package", pkg))
-
-// 	return pkg, nil
-// }
-
 func (s *Server) handleAddPackage(w http.ResponseWriter, r *http.Request) {
 
+	// if rand.Float64() < s.dropRate {
+	// 	http.Error(w, "simulated network failure", http.StatusServiceUnavailable)
+	// 	return
+	// }
 	pkg := &commons.Package{}
 	err := json.NewDecoder(r.Body).Decode(pkg)
 	if err != nil {
@@ -377,10 +507,22 @@ func (s *Server) handleAddPackage(w http.ResponseWriter, r *http.Request) {
 
 	if currHead.GetState() == commons.Undefined {
 		// Only allow saving the package if the state is undefined.
-		if ok := s.answer[pkg.BrokerID].UpdateState(currHead, commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})); ok {
-			s.packageArray.Put(pkg)
-			s.writeChan <- pkg
-		}
+		// if ok := s.answer[pkg.BrokerID].UpdateState(currHead, commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})); ok {
+		// 	s.packageArray.Put(pkg)
+		// 	s.writeChan <- pkg
+		// }
+		// snapshot the values for this iteration
+		p := pkg
+		h := currHead
+
+		go func(pkg *commons.Package, head *commons.StateNode) {
+			if ok := s.answer[pkg.BrokerID].UpdateState(head,
+				commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg}),
+			); ok {
+				s.packageArray.Put(pkg)
+				s.writeChan <- pkg
+			}
+		}(p, h)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -390,9 +532,12 @@ func (s *Server) handleAddPackage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRequestPackage(w http.ResponseWriter, r *http.Request) {
+	// if rand.Float64() < s.dropRate {
+	// 	http.Error(w, "simulated network failure", http.StatusServiceUnavailable)
+	// 	return
+	// }
 	params := r.URL.Query()
 	brokerID := params.Get("brokerID")
-
 	logger.Info("Received request for package", zap.String("brokerID", brokerID))
 	brokerIDInt, err := strconv.Atoi(brokerID)
 	if err != nil {
@@ -477,36 +622,37 @@ func (s *Server) handleBrokerOk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logger.Info("Received package from broker", zap.Int("brokerID", pkg.BrokerID), zap.Int("packageID", pkg.PackageID))
+	logger.Info("Received package from broker ok request", zap.Int("brokerID", pkg.BrokerID), zap.Int("packageID", pkg.PackageID))
 
-	if ok := s.answer[pkg.BrokerID].UpdateState(currHead, commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})); ok {
-		// If the package is successfully updated, we put it in the packageArray and write it to the write channel.
+	// if ok := s.answer[pkg.BrokerID].UpdateState(currHead, commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})); ok {
+	// 	// If the package is successfully updated, we put it in the packageArray and write it to the write channel.
 
-		s.packageArray.Put(pkg)
-		s.writeChan <- pkg
-	}
+	// 	s.packageArray.Put(pkg)
+	// 	s.writeChan <- pkg
+	// }
+	// snapshot the values for this iteration
+	p := pkg
+	h := currHead
+	go func(pkg *commons.Package, head *commons.StateNode) {
+		if ok := s.answer[pkg.BrokerID].UpdateState(head,
+			commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg}),
+		); ok {
+			s.packageArray.Put(pkg)
+			s.writeChan <- pkg
+		}
+	}(p, h)
 
 	// Write the package to file
 	// TODO: Remove this after testing.
-	if err := s.writePackage(pkg); err != nil {
-		logger.Error("error writing package to file", zap.String("filePath", fmt.Sprintf("./packages_%d/pkg_%d_%d.json", s.serverID, pkg.BrokerID, pkg.PackageID)), zap.Error(err))
-		http.Error(w, "Error writing package to file", http.StatusInternalServerError)
-		return
-	}
+	// if err := s.writePackage(pkg); err != nil {
+	// 	logger.Error("error writing package to file", zap.String("filePath", fmt.Sprintf("./packages_%d/pkg_%d_%d.json", s.serverID, pkg.BrokerID, pkg.PackageID)), zap.Error(err))
+	// 	http.Error(w, "Error writing package to file", http.StatusInternalServerError)
+	// 	return
+	// }
 	w.WriteHeader(http.StatusOK)
 }
 
-func (s *Server) setupServer() (*http.Server, error) {
-	r := mux.NewRouter()
-	r.HandleFunc(commons.SERVER_UPDATE_DIRECTORY, commons.HandleUpdateDirectory(logger, s.DirectoryInfo)).Methods("POST")
-	r.HandleFunc(commons.SERVER_ADD_PACKAGE, s.handleAddPackage).Methods("POST")
-	r.HandleFunc(commons.SERVER_REQUEST_PACKAGE, s.handleRequestPackage).Methods("GET")
-
-	//r.HandleFunc(commons.SERVER_READ_STORAGE, s.handleReadPackageStorage).Methods("GET")
-
-	r.HandleFunc(commons.SERVER_IGNORE_BROKER, s.handleIgnoreBroker).Methods("POST")
-	r.HandleFunc(commons.SERVER_BROKER_OK, s.handleBrokerOk).Methods("POST")
-
+func (s *Server) registerServer() error {
 	// Create JSON payload
 	data := map[string]interface{}{
 		"ip":         s.ip,
@@ -516,25 +662,25 @@ func (s *Server) setupServer() (*http.Server, error) {
 
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		return nil, fmt.Errorf("error encoding JSON: %v", err)
+		return fmt.Errorf("error encoding JSON: %v", err)
 	}
 
 	resp, err := http.Post(fmt.Sprintf("%s%s", s.directoryAddr, commons.DIRECTORY_REGISTER_SERVER), "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
-		return nil, fmt.Errorf("error sending request to directory: %v, could not start server", err)
+		return fmt.Errorf("error sending request to directory: %v, could not start server", err)
 	}
 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
 	// Read response
 	body, _ := io.ReadAll(resp.Body)
 
 	if err := json.Unmarshal(body, s.DirectoryInfo); err != nil {
-		return nil, fmt.Errorf("error unmarshalling JSON: %v", err)
+		return fmt.Errorf("error unmarshalling JSON: %v", err)
 	}
 
 	logger.Info("Directory info received", zap.String("directoryInfo", string(body)))
@@ -542,7 +688,33 @@ func (s *Server) setupServer() (*http.Server, error) {
 	// Since we locking the directory service, we can safely assume that the version is the same as the serverID
 	s.serverID = s.DirectoryInfo.ServerMap.Version
 	logger.Info("Server registered", zap.Int("serverID", s.serverID))
-	// Create HTTP request
+	return nil
+}
+
+func (s *Server) setupServer() (*http.Server, error) {
+	if err := s.registerServer(); err != nil {
+		return nil, fmt.Errorf("error registering broker: %v", err)
+	}
+	err := commons.BroadcastNodesInfo(logger, s.serverID, commons.ServerType, s.DirectoryInfo)
+	if err != nil {
+		logger.Error("error while broadcasting directory info", zap.Error(err))
+	}
+	r := mux.NewRouter()
+	r.Use(s.MetricsMiddleware)
+	r.HandleFunc(commons.SERVER_UPDATE_DIRECTORY, commons.HandleUpdateDirectory(logger, s.DirectoryInfo)).Methods("POST")
+	r.HandleFunc(commons.SERVER_ADD_PACKAGE, s.handleAddPackage).Methods("POST")
+	r.HandleFunc(commons.SERVER_REQUEST_PACKAGE, s.handleRequestPackage).Methods("GET")
+
+	//r.HandleFunc(commons.SERVER_READ_STORAGE, s.handleReadPackageStorage).Methods("GET")
+
+	r.HandleFunc(commons.SERVER_IGNORE_BROKER, s.handleIgnoreBroker).Methods("POST")
+	r.HandleFunc(commons.SERVER_BROKER_OK, s.handleBrokerOk).Methods("POST")
+
+	// Prometheus metrics
+	initMetrics(s.serverID)
+	r.Path("/metrics").Handler(promhttp.Handler())
+
+	// // Create HTTP request
 	return &http.Server{
 		Addr:    fmt.Sprintf(":%d", s.port),
 		Handler: r,
@@ -629,9 +801,10 @@ func (s *Server) requestPackagesFromStorage(endpoint string, brokerList []int) {
 
 func (s *Server) sendIgnoreBroker(serverURL string) func() error {
 	return func() error {
-		client := &http.Client{
-			Timeout: commons.SERVER_REQUEST_TIMEOUT,
-		}
+		// client := &http.Client{
+		// 	Timeout: commons.SERVER_REQUEST_TIMEOUT,
+		// }
+		client := makeInstrumentedClient("send-ignore-broker")
 		req, err := http.NewRequest("POST", serverURL, nil)
 		if err != nil {
 			panic(err)
@@ -660,9 +833,9 @@ func (s *Server) sendBrokerOkWithRetry(serverURL string, pkg *commons.Package) e
 	}
 	return retry.Do(
 		s.sendPackage(serverURL, jsonData),
-		retry.Attempts(commons.SERVER_RETRY), // Number of retry attempts
-		retry.Delay(0),                       // No delay
-		retry.DelayType(retry.FixedDelay),    // Use fixed delay strategy
+		retry.Attempts(2),                 // Number of retry attempts
+		retry.Delay(0),                    // No delay
+		retry.DelayType(retry.FixedDelay), // Use fixed delay strategy
 		retry.OnRetry(func(n uint, err error) {
 			logger.Error("Retrying broker ok request", zap.String("serverURL", serverURL), zap.Int("brokerID", pkg.BrokerID), zap.Int("attempt", int(n)+1), zap.Error(err))
 		}),
@@ -753,9 +926,10 @@ func (s *Server) sendCurrentServerIDWithRetry(serverURL string) error {
 
 func (s *Server) sendServerID(serverURL string) func() error {
 	return func() error {
-		client := &http.Client{
-			Timeout: commons.SERVER_REQUEST_TIMEOUT,
-		}
+		// client := &http.Client{
+		// 	Timeout: commons.SERVER_REQUEST_TIMEOUT,
+		// }
+		client := makeInstrumentedClient("send-server-id")
 
 		// Create a new HTTP request to request package
 		req, err := http.NewRequest("GET", serverURL, nil)
@@ -819,13 +993,20 @@ func (s *Server) protocolDaemon(nextRun time.Time) {
 		waitPackage := nextRun.Add(commons.WAIT_FOR_BROKER_PACKAGE)
 		nextRun = nextRun.Add(commons.EPOCH_PERIOD)
 
+		if s.packageCounter == 0 {
+			s.setupAnswerMap()
+		}
+		s.packageCounter++
+		epochNumber.WithLabelValues().Set(float64(s.packageCounter))
+		start_time := time.Now()
+		timer := prometheus.NewTimer(protocolDuration.WithLabelValues())
 		err := commons.BroadcastNodesInfo(logger, s.serverID, commons.ServerType, s.DirectoryInfo)
 		if err != nil {
 			logger.Error("error while broadcasting directory info", zap.Error(err))
 		}
 		// Setup the answer map for fresh epoch.
-		s.setupAnswerMap()
-		s.packageCounter++
+		// s.setupAnswerMap()
+		// s.packageCounter++
 		// err := commons.BroadcastNodesInfo(logger, s.serverID, commons.ServerType, s.DirectoryInfo)
 		// if err != nil {
 		// 	logger.Error("error while broadcasting directory info", zap.Error(err))
@@ -882,9 +1063,12 @@ func (s *Server) protocolDaemon(nextRun time.Time) {
 		// Send ignore broker requests to other servers.
 		logger.Info("Sending ignore broker requests to other servers for brokers", zap.Any("brokers", pendingBrokerList))
 		s.sendIgnoreBrokerRequests(pendingBrokerList)
-
+		timer.ObserveDuration()
+		duration := time.Since(start_time).Seconds()
+		epochDuration.WithLabelValues(strconv.Itoa(s.packageCounter)).Set(duration)
 		logger.Info("Protocol Completed")
-
+		logger.Info("setting up answer map for next epoch")
+		s.setupAnswerMap()
 		logger.Info("Next run will happen at: %s", zap.Time("nextRun", nextRun))
 	}
 }
@@ -908,6 +1092,10 @@ func main() {
 
 	var startTimestamp int64
 	flag.Int64Var(&startTimestamp, "startTimestamp", 0, "Start timestamp")
+
+	var dropRate float64
+	flag.Float64Var(&dropRate, "dropRate", 0, "drop rate")
+	rand.Seed(time.Now().UnixNano())
 
 	var logFile string
 	flag.StringVar(&logFile, "logFile", "./logs/broker.log", "Path to the log file")
@@ -988,6 +1176,7 @@ func main() {
 		answer:         make(map[int]*commons.StateList),
 		packageArray:   queue.NewRingBuffer(BUFFER_SIZE),
 		writeChan:      make(chan *commons.Package, WRITE_BUFFER_SIZE),
+		dropRate:       dropRate,
 	}
 
 	httpServer, err := server.setupServer()

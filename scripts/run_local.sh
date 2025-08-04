@@ -43,14 +43,14 @@ done
 for ((i=1; i<=numServer; i++)); do
         # Commands to execute on the broker
         chmod +x server
-        ./server -directoryIP=localhost -directoryPort 8080 -serverIP=localhost -serverPort $((9080+${i})) -readerPort $((9090+${i})) -startTimestamp ${scheduleTimestamp} -logFile ./logs/server${i}.log &
+        ./server -directoryIP=localhost -directoryPort 8080 -serverIP=localhost -serverPort $((9080+${i})) -readerPort $((9090+${i})) -startTimestamp ${scheduleTimestamp} -logFile ./logs/server${i}.log -dropRate 0 &
 done
 
 # Loop over brokers and send multi-line SSH commands
 for ((i=1; i<=numBroker; i++)); do
         # Commands to execute on the broker
         chmod +x broker
-        ./broker -test -directoryIP=localhost -directoryPort 8080 -brokerIP=localhost -brokerPort $((8080+${i})) -startTimestamp ${scheduleTimestamp} -logFile ./logs/broker${i}.log &
+        ./broker -test -directoryIP=localhost -directoryPort 8080 -brokerIP=localhost -brokerPort $((8080+${i})) -startTimestamp ${scheduleTimestamp} -logFile ./logs/broker${i}.log -dropRate 0 &
 done
 
 disown

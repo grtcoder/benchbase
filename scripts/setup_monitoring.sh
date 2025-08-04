@@ -34,6 +34,54 @@ for ((i=1; i<=numServer; i++)); do
 EOF
 done
 
+###############
+# Generate prometheus.yml locally
+###############
+cat > configs/prometheus.yml <<EOF
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+
+scrape_configs:
+  - job_name: "l-free-machine"
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+EOF
+
+# brokers on port 8083
+METRICS_PORT=8083
+for ((i=1; i<=numBroker; i++)); do
+  host="broker${i}.${experimentName}.${projectName}.${clusterType}.${suffix}:$METRICS_PORT"
+  printf '          - "%s"\n' "$host" >> configs/prometheus.yml
+done
+
+cat >> configs/prometheus.yml <<EOF
+        labels:
+          role: broker
+
+      - targets:
+EOF
+
+# servers on port 8083
+SERVER_METRICS_PORT=8083
+for ((i=1; i<=numServer; i++)); do
+  host="server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}:$SERVER_METRICS_PORT"
+  printf '          - "%s"\n' "$host" >> configs/prometheus.yml
+done
+
+cat >> configs/prometheus.yml <<EOF
+        labels:
+          role: server
+EOF
+echo "Generated prometheus.yml"
+
+###############
+# Push prometheus.yml up and start Prometheus
+###############
+
+
+PROM_VER="3.5.0"
 server_url="at6404@monitoring.${experimentName}.${projectName}.${clusterType}.${suffix}"
 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${server_url} << EOF
  # Commands to execute on the broker
@@ -43,5 +91,12 @@ unzip loki-linux-amd64.zip
 chmod +x loki-linux-amd64
 sudo mv loki-linux-amd64 /usr/local/bin/loki
 rm loki-linux-amd64*
+curl -O -L "https://github.com/prometheus/prometheus/releases/download/v${PROM_VER}/prometheus-${PROM_VER}.linux-amd64.tar.gz"
+tar xzf prometheus-${PROM_VER}.linux-amd64.tar.gz
+chmod +x prometheus-${PROM_VER}.linux-amd64/prometheus
+chmod +x prometheus-${PROM_VER}.linux-amd64/promtool
+sudo mv prometheus-${PROM_VER}.linux-amd64/prometheus /usr/local/bin/prometheus
+sudo mv prometheus-${PROM_VER}.linux-amd64/promtool  /usr/local/bin/promtool
+rm -rf prometheus-${PROM_VER}.linux-amd64.tar.gz prometheus-${PROM_VER}.linux-amd64 
 exit
 EOF

@@ -35,7 +35,7 @@ url="at6404@directory.${experimentName}.${projectName}.${clusterType}.${suffix}:
 scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null directory ./configs/promtail-config.yml ${url} &
 
 url="at6404@monitoring.${experimentName}.${projectName}.${clusterType}.${suffix}:/users/at6404"
-scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ./configs/loki-config.yml ${url} &
+scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ./configs/loki-config.yml ./configs/prometheus.yml ${url} &
 
 wait
 echo "All binary transfers are complete."
@@ -61,8 +61,10 @@ monitoring_url="at6404@monitoring.${experimentName}.${projectName}.${clusterType
 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${monitoring_url} << EOF
         # Commands to execute on the broker
         cd /users/at6404
+        mkdir -p prometheus-data
         nohup /usr/local/bin/loki -config.file=loki-config.yml > /dev/null 2>&1 &
-        disown
+        nohup /usr/local/bin/prometheus --config.file=prometheus.yml --storage.tsdb.path=./prometheus-data > prometheus.log 2>&1 &
+        disown -a
         exit
 EOF
 
@@ -81,7 +83,7 @@ for ((i=1; i<=numBroker; i++)); do
         cd /users/at6404
         chmod +x broker
         nohup promtail --config.file=promtail-config.yml > /dev/null 2>&1 &
-        nohup ./broker -directoryIP=${directory_url:7} -directoryPort 8080 -brokerIP=${broker_url:7} -brokerPort 8083 -startTimestamp ${scheduleTimestamp} -logFile ./logs/broker${i}.log > /dev/null 2>&1 &
+        nohup ./broker -directoryIP=${directory_url:7} -directoryPort 8080 -brokerIP=${broker_url:7} -brokerPort 8083 -startTimestamp ${scheduleTimestamp} -dropRate ${dropRate} -logFile ./logs/broker${i}.log > /dev/null 2>&1 &
         disown
         exit
 EOF
@@ -95,22 +97,9 @@ for ((i=1; i<=numServer; i++)); do
         chmod +x server
         chmod +x storage_reader
         nohup promtail --config.file=promtail-config.yml > /dev/null 2>&1 &
-        nohup ./server -directoryIP=${directory_url:7} -directoryPort 8080 -serverIP=${server_url:7} -serverPort 8083 -readerPort 9085 -startTimestamp ${scheduleTimestamp} -logFile ./logs/server${i}.log > /dev/null 2>&1 &
+        nohup ./server -directoryIP=${directory_url:7} -directoryPort 8080 -serverIP=${server_url:7} -serverPort 8083 -readerPort 9085 -startTimestamp ${scheduleTimestamp} -dropRate ${dropRate} -logFile ./logs/server${i}.log > /dev/null 2>&1 &
         nohup ./storage_reader -directoryIP=${directory_url:7} -directoryPort 8080 -serverIP=${server_url:7} -readerPort 9085 -startTimestamp ${scheduleTimestamp} -logFile ./logs/storage_reader${i}.log > /dev/null 2>&1 &
         disown -a
         exit
 EOF
 done
-
-# for ((i=1; i<=numServer; i++)); do
-#     server_url="at6404@server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
-#     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${server_url} << EOF
-#         # Commands to execute on the broker
-#         cd /users/at6404
-#         chmod +x storage_reader
-#         # nohup promtail --config.file=promtail-config.yml > /dev/null 2>&1 &
-#         nohup ./storage_reader -directoryIP=${directory_url:7} -directoryPort 8080 -serverIP=${server_url:7} -readerPort 9083 -startTimestamp ${scheduleTimestamp} -logFile ./logs/storage_reader${i}.log > /dev/null 2>&1 &
-#         disown
-#         exit
-# EOF
-# done
