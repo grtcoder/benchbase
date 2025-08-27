@@ -33,7 +33,9 @@ for ((i=1; i<=numServer; i++)); do
         # Commands to execute on the broker
         cd /users/at6404
         sudo pkill -f server
+        sudo pkill -f storage_reader
         rm -f server output.log *.json *.yml
+        rm -f storage_reader output.log *.json *.yml
         rm -rf logs
         rm -rf packages*
         sudo pkill -f promtail

@@ -44,6 +44,13 @@ echo "All binary transfers are complete."
 sleep 1m
 
 
+read -p "After how long do you want to start ( in seconds )?: " startTime
+
+# Calculate the schedule timestamp based on the current time and user input
+currTimestamp=$(python3 -c "import time; print(time.time_ns())")
+scheduleTimestamp=$((currTimestamp + ${startTime}*1000000000))
+echo "Schedule Timestamp: $scheduleTimestamp, current Timestamp: $currTimestamp"
+
 directory_url="at6404@directory.${experimentName}.${projectName}.${clusterType}.${suffix}"
 
 # Start the directory first
@@ -51,7 +58,7 @@ ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${directory_url}
         # Commands to execute on the broker
         cd /users/at6404
         chmod +x directory
-        ./directory > output.log 2>&1 &
+        ./directory -startTimestamp ${scheduleTimestamp} > output.log 2>&1 &
         disown
         exit
 EOF
@@ -68,12 +75,7 @@ ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${monitoring_url
         exit
 EOF
 
-read -p "After how long do you want to start ( in seconds )?: " startTime
-
-# Calculate the schedule timestamp based on the current time and user input
-currTimestamp=$(python3 -c "import time; print(time.time_ns())")
-scheduleTimestamp=$((currTimestamp + ${startTime}*1000000000))
-echo "Schedule Timestamp: $scheduleTimestamp, current Timestamp: $currTimestamp"
+sleep 10
 
 # Loop over brokers and send multi-line SSH commands
 for ((i=1; i<=numBroker; i++)); do
@@ -83,7 +85,20 @@ for ((i=1; i<=numBroker; i++)); do
         cd /users/at6404
         chmod +x broker
         nohup promtail --config.file=promtail-config.yml > /dev/null 2>&1 &
-        nohup ./broker -directoryIP=${directory_url:7} -directoryPort 8080 -brokerIP=${broker_url:7} -brokerPort 8083 -startTimestamp ${scheduleTimestamp} -dropRate ${dropRate} -logFile ./logs/broker${i}.log > /dev/null 2>&1 &
+        nohup ./broker -directoryIP=${directory_url:7} -directoryPort 8080 -brokerIP=${broker_url:7} -brokerPort 8083 -dropRate ${dropRate} -logFile ./logs/broker${i}.log > /dev/null 2>&1 &
+        disown
+        exit
+EOF
+done
+
+
+for ((i=1; i<=numServer; i++)); do
+    server_url="at6404@server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${server_url} << EOF
+        # Commands to execute on the broker
+        cd /users/at6404
+        chmod +x storage_reader
+        nohup ./storage_reader -directoryIP=${directory_url:7} -directoryPort 8080 -serverIP=${server_url:7} -readerPort 9085 -startTimestamp ${scheduleTimestamp} -logFile ./logs/storage_reader${i}.log > /dev/null 2>&1 &
         disown
         exit
 EOF
@@ -93,13 +108,13 @@ for ((i=1; i<=numServer; i++)); do
     server_url="at6404@server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${server_url} << EOF
         # Commands to execute on the broker
+        trap '' HUP
         cd /users/at6404
+        ulimit -n 65535
         chmod +x server
-        chmod +x storage_reader
         nohup promtail --config.file=promtail-config.yml > /dev/null 2>&1 &
-        nohup ./server -directoryIP=${directory_url:7} -directoryPort 8080 -serverIP=${server_url:7} -serverPort 8083 -readerPort 9085 -startTimestamp ${scheduleTimestamp} -dropRate ${dropRate} -logFile ./logs/server${i}.log > /dev/null 2>&1 &
-        nohup ./storage_reader -directoryIP=${directory_url:7} -directoryPort 8080 -serverIP=${server_url:7} -readerPort 9085 -startTimestamp ${scheduleTimestamp} -logFile ./logs/storage_reader${i}.log > /dev/null 2>&1 &
-        disown -a
+        setsid nohup ./server -directoryIP=${directory_url:7} -directoryPort 8080 -serverIP=${server_url:7} -serverPort 8083 -readerPort 9085 -dropRate ${dropRate} -logFile ./logs/server${i}.log > /dev/null 2>&1 &
+        disown
         exit
 EOF
 done
