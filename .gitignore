@@ -37,3 +37,4 @@ env/
 CMakeFiles/
 CMakeCache.txt
 *.json
+*.log
