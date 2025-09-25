@@ -575,12 +575,12 @@ func (s *Server) consumePackageArray() {
 		}
 
 		// Process the package
-		scheduled, normalOut, err := dag.Schedule(pkg.Transactions,&s.counter)
+		normalOut, err := dag.Schedule(pkg.Transactions,&s.counter)
 		if err != nil {
 			log.Println("Error scheduling transactions:", err)
 			continue
 		}
-		dag.ExecuteParallel(scheduled, normalOut)
+		dag.ExecuteParallel(pkg.Transactions, normalOut)
 	}
 }
 

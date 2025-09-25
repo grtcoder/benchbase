@@ -1,10 +1,11 @@
 package dag
 
 import (
+	"errors"
+	"fmt"
 	"lockfreemachine/pkg/commons"
 	"sync"
-	"fmt"
-	"errors"
+	"sync/atomic"
 )
 
 // TODO: Use this to interact with LSM tree
@@ -26,7 +27,8 @@ func executeTransaction(tx *commons.Transaction) {
 	}
 }
 
-func ExecuteParallel(txs []*commons.Transaction, normalOut map[int]map[int]bool) {
+func ExecuteParallel(txs []*commons.Transaction, normalOut map[int]map[int]bool) []int {
+	n := len(txs)
 	inDegree := make(map[int]int)
 	for u := range normalOut {
 		for v := range normalOut[u] {
@@ -34,46 +36,44 @@ func ExecuteParallel(txs []*commons.Transaction, normalOut map[int]map[int]bool)
 		}
 	}
 
-	n := len(txs)
-	processed := make(map[int]bool)
 	var mu sync.Mutex
-	var wg sync.WaitGroup
-
 	readyCh := make(chan int, n)
 	for i := 0; i < n; i++ {
 		if inDegree[i] == 0 {
 			readyCh <- i
-			wg.Add(1)
 		}
 	}
 
+	ordering:= []int{}
 	// Spawn worker goroutines
-	for i := 0; i < n; i++ {
-		go func() {
-			for txID := range readyCh {
-				executeTransaction(txs[txID])
-				mu.Lock()
-				processed[txID] = true
-				for v := range normalOut[txID] {
-					inDegree[v]--
-					if inDegree[v] == 0 && !processed[v] {
-						wg.Add(1)
-						readyCh <- v
-					}
-				}
-				mu.Unlock()
-				wg.Done()
-			}
-		}()
+	var numProcessed atomic.Int64
+	for txID := range readyCh {
+				go func(txID int) {
+					executeTransaction(txs[txID])
+					numProcessed.Add(1)
+					// Record execution order
+					ordering=append(ordering,txID)
+						mu.Lock()
+						for v := range normalOut[txID] {
+							inDegree[v]--
+							if inDegree[v] == 0 {
+								readyCh <- v
+							}
+						}
+						mu.Unlock()
+						if int(numProcessed.Load()) == n {
+							close(readyCh)
+						}
+				}(txID)
 	}
-	wg.Wait()
-	close(readyCh)
+	
+	return ordering
 }
 
 // Schedule applies the Multicopy Directionality Algorithm to a list of transactions and returns timestamps assigned and dependency graph for execution
-func Schedule(txs []*commons.Transaction,counter *int) ([]*commons.Transaction, map[int]map[int]bool, error) {
+func Schedule(txs []*commons.Transaction,counter *int) (map[int]map[int]bool, error) {
 	if len(txs) == 0 {
-		return nil, nil, errors.New("no transactions to schedule")
+		return nil, errors.New("no transactions to schedule")
 	}
 	n := len(txs)
 
@@ -179,15 +179,18 @@ func Schedule(txs []*commons.Transaction,counter *int) ([]*commons.Transaction, 
 	}
 
 	// --- Phase 4: Build Final Execution Order ---
-	execOrder := make([]int, n)
-	for id, t := range TS {
-		execOrder[t] = id
+	for id,t := range TS {
+		txs[id].Timestamp = int64(t)
 	}
+	// execOrder := make([]int, n)
+	// for id, t := range TS {
+	// 	execOrder[t] = id
+	// }
 
-	scheduled := make([]*commons.Transaction, n)
-	for i, txID := range execOrder {
-		scheduled[i] = txs[txID]
-	}
+	// scheduled := make([]*commons.Transaction, n)
+	// for i, txID := range execOrder {
+	// 	scheduled[i] = txs[txID]
+	// }
 
-	return scheduled, normalOut, nil
+	return normalOut, nil
 }
