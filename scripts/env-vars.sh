@@ -1,7 +1,7 @@
 #!/bin/bash
 
-numServer=8
-numBroker=2
+numServer=5
+numBroker=5
 experimentName="anand-test"
 clusterType="emulab"
 projectName="l-free-machine"
