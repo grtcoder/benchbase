@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"time"
 
 	"lockfreemachine/src/pkg/commons"
@@ -22,6 +25,11 @@ var latestBrokerID int
 
 // This will also serve as the version of the server information.
 var latestServerID int
+
+// packageCounter is same as epoch number
+var packageCounter int64
+
+var nextRunTime atomic.Value
 
 func registerBroker(w http.ResponseWriter, r *http.Request) {
 	// Read the JSON body
@@ -52,10 +60,17 @@ func registerBroker(w http.ResponseWriter, r *http.Request) {
 	// brokerInfo.Unlock()
 
 	log.Printf("Broker registered with ID: %d", brokerID)
-
+	epochNum := atomic.LoadInt64(&packageCounter)
+	nexTimestamp := nextRunTime.Load().(time.Time)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(nodesInfo)
+	resp := map[string]any{
+		"timestamp":   nexTimestamp,
+		"epochNumber": epochNum,
+		"nodesInfo":   nodesInfo,
+	}
+	json.NewEncoder(w).Encode(resp)
+	//json.NewEncoder(w).Encode(nodesInfo)
 }
 
 func registerServer(w http.ResponseWriter, r *http.Request) {
@@ -86,10 +101,17 @@ func registerServer(w http.ResponseWriter, r *http.Request) {
 	//serverInfo.Unlock()
 
 	log.Printf("Server registered with ID: %d", serverID)
-
+	epochNum := atomic.LoadInt64(&packageCounter)
+	nexTimestamp := nextRunTime.Load().(time.Time)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(nodesInfo)
+	resp := map[string]any{
+		"timestamp":   nexTimestamp,
+		"epochNumber": epochNum,
+		"nodesInfo":   nodesInfo,
+	}
+	json.NewEncoder(w).Encode(resp)
+	//json.NewEncoder(w).Encode(nodesInfo)
 }
 
 // assume nodesInfo is your global *commons.NodesMap
@@ -136,7 +158,49 @@ func deRegisterServer(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(nodesInfo)
 }
 
+func protocolDaemon() {
+	atomic.StoreInt64(&packageCounter, 0)
+	// logger.Info("Starting protocol daemon...")
+
+	// We want the ticker to have millisecond precision
+	ticker := time.NewTicker(time.Millisecond)
+	// logger.Info("Next run will happen at", zap.Time("nextRun", nextRun))
+	log.Println("nextRun: ", nextRunTime.Load().(time.Time))
+
+	for tc := range ticker.C {
+		nr := nextRunTime.Load().(time.Time)
+		if tc.Before(nr) {
+			continue
+		}
+		nr = nr.Add(commons.EPOCH_PERIOD)
+		nextRunTime.Store(nr)
+		//packageCounter++
+		atomic.AddInt64(&packageCounter, 1)
+
+		//logger.Info("Next run will happen at", zap.Time("nextRun", nextRun))
+		log.Println("nextRun: ", nextRunTime.Load().(time.Time))
+		epochNum := atomic.LoadInt64(&packageCounter)
+		if epochNum == 500 {
+			log.Println("5000 epochs done, ending experiment")
+			return
+		}
+	}
+}
+
 func main() {
+
+	var startTimestamp int64
+	flag.Int64Var(&startTimestamp, "startTimestamp", 0, "Start timestamp")
+
+	var logFile string
+	flag.StringVar(&logFile, "logFile", "./logs/directory.log", "Path to the log file")
+	flag.Parse()
+	err := os.Mkdir("./logs", 0755)
+	if err != nil && !os.IsExist(err) {
+		// Only log or handle real errors
+		panic(err)
+	}
+
 	// Initialize the broker and server counter to 0.
 	latestBrokerID = 0
 	latestServerID = 0
@@ -171,7 +235,14 @@ func main() {
 		}
 	}()
 	log.Println("Server running on http://localhost:8080")
-
+	log.Printf("raw startTimestamp=%d", startTimestamp)
+	firstEpochTime := time.Unix(0, startTimestamp)
+	nextRunTime.Store(firstEpochTime)
+	log.Println("firstRun: ", firstEpochTime)
+	go func() {
+		protocolDaemon()
+		defer fmt.Println("Daemon routine stopped.")
+	}()
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt)
 	<-quit

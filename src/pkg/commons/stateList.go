@@ -69,6 +69,21 @@ func (l *StateList) UpdateState(currHead, newHead *StateNode) bool {
 	return atomic.CompareAndSwapPointer((*unsafe.Pointer)(unsafe.Pointer(&l.head)), unsafe.Pointer(currHead), unsafe.Pointer(newHead))
 }
 
+func (l *StateList) ReplaceState(newVal *StateValue) {
+	for {
+		old := l.GetHead()
+		newHead := &StateNode{val: newVal, next: nil} // no link to old
+		if atomic.CompareAndSwapPointer(
+			(*unsafe.Pointer)(unsafe.Pointer(&l.head)),
+			unsafe.Pointer(old),
+			unsafe.Pointer(newHead),
+		) {
+			return
+		}
+		// retry on contention
+	}
+}
+
 func NewStateList() *StateList {
 	ptr := &StateList{
 		// Initialize the head node with a nil state and pkg value.

@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"encoding/json"
@@ -32,10 +33,10 @@ var logger *zap.Logger
 
 const (
 	// Maximum number of packages the package Array can hold.
-	BUFFER_SIZE = 10000
+	BUFFER_SIZE = 100000
 
 	// Maximum number of packages the write channel can hold.
-	WRITE_BUFFER_SIZE = 100
+	WRITE_BUFFER_SIZE = 1000
 )
 
 var (
@@ -44,7 +45,8 @@ var (
 	apiCallDuration  *prometheus.HistogramVec
 	epochNumber      *prometheus.GaugeVec
 	protocolDuration *prometheus.HistogramVec
-	epochDuration    *prometheus.GaugeVec
+	epochDuration    prometheus.Gauge
+	epochDuration1   *prometheus.GaugeVec
 )
 
 func initMetrics(serverID int) {
@@ -65,11 +67,11 @@ func initMetrics(serverID int) {
 
 	requestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "api_request_duration_milliseconds",
-			Help:    "Duration of API requests in milliseconds",
+			Name:    "api_request_duration_seconds",
+			Help:    "Duration of API requests in seconds",
 			Buckets: prometheus.DefBuckets, // You can customize this
 		},
-		[]string{"path", "method", "srcID", "srcType"}, // group by endpoint/method if you want
+		[]string{"path", "method", "srcType"}, // group by endpoint/method if you want
 	)
 
 	apiCallDuration = prometheus.NewHistogramVec(
@@ -80,14 +82,6 @@ func initMetrics(serverID int) {
 		},
 		[]string{"method", "targetID"},
 	)
-
-	// setupTime = prometheus.NewGaugeVec(
-	// 	prometheus.GaugeOpts{
-	// 		Name: "setup_time",
-	// 		Help: "Time taken to set up the broker",
-	// 	},
-	// 	[]string{},
-	// )
 
 	epochNumber = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -107,7 +101,14 @@ func initMetrics(serverID int) {
 		[]string{}, // no extra labels
 	)
 
-	epochDuration = prometheus.NewGaugeVec(
+	epochDuration = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "protocol_last_epoch_duration_in_seconds",
+			Help: "Wall clock seconds taken by most recent protocol epoch run",
+		},
+	)
+
+	epochDuration1 = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "protocol_epoch_duration_in_seconds",
 			Help: "Wall clock seconds taken by each protocol epoch run",
@@ -121,31 +122,33 @@ func initMetrics(serverID int) {
 	wrappedRegisterer.MustRegister(epochNumber)
 	wrappedRegisterer.MustRegister(protocolDuration)
 	wrappedRegisterer.MustRegister(epochDuration)
+	wrappedRegisterer.MustRegister(epochDuration1)
 
 }
 
 // Middleware to measure duration with dynamic labels
 func (s *Server) MetricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if rand.Float64() < s.dropRate {
-			// increment a “dropped” metric if you want:
 			httpRequests.WithLabelValues(r.URL.Path, r.Method).Inc()
 			http.Error(w, "simulated network failure", http.StatusServiceUnavailable)
 			return
 		}
 
-		nodeID := r.Header.Get("X-NodeID")     // Grab dynamic tenant ID from headers
-		nodeType := r.Header.Get("X-NodeType") // Grab dynamic tenant ID from headers
+		nodeID := r.Header.Get("X-NodeID")
+		nodeType := r.Header.Get("X-NodeType")
 		if nodeID == "" {
 			nodeID = "unknown"
 			nodeType = "unknown"
 		}
+		if nodeType == "" {
+			nodeType = "unknown"
+		}
 
-		// if r.URL.Path == "/metrics" {
-		// 	// skip
-		// 	promhttp.Handler().ServeHTTP(w, r)
-		// 	return
-		// }
 		httpRequests.WithLabelValues(r.URL.Path, r.Method).Inc()
 		start := time.Now()
 
@@ -154,9 +157,16 @@ func (s *Server) MetricsMiddleware(next http.Handler) http.Handler {
 
 		duration := time.Since(start).Seconds()
 
-		// Record with dynamic label
-		requestDuration.WithLabelValues(r.URL.Path, r.Method, nodeID, nodeType).Observe(duration)
+		requestDuration.WithLabelValues(r.URL.Path, r.Method, nodeType).Observe(duration)
 	})
+}
+
+var sharedTr = &http.Transport{
+	MaxIdleConns:          512,
+	MaxIdleConnsPerHost:   128,
+	IdleConnTimeout:       90 * time.Second,
+	ResponseHeaderTimeout: 5 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
 }
 
 func makeInstrumentedClient(targetID string) *http.Client {
@@ -167,8 +177,8 @@ func makeInstrumentedClient(targetID string) *http.Client {
 
 	// Wrap the default transport
 	instrumentedTransport := promhttp.InstrumentRoundTripperDuration(
-		curried,               // ObserverVec for apiCallDuration
-		http.DefaultTransport, // underlying RoundTripper
+		curried,  // ObserverVec for apiCallDuration
+		sharedTr, // underlying RoundTripper
 	)
 
 	return &http.Client{
@@ -189,7 +199,8 @@ func (s *Server) writeToFile() {
 		err := s.writePackage(data)
 		if err != nil {
 			logger.Error("Failed to write package to file", zap.Error(err))
-			return
+			logger.Info("oi panic panic writefile")
+			continue
 		}
 	}
 
@@ -216,30 +227,31 @@ func findSetDifference(list1, list2 []int) []int {
 
 // Server struct represents the server instance.
 type Server struct {
-	ip             string // IP address of the server
-	port           int    // Port number of the server
-	readerPort     int    //port number of the reader service, the ip remains the same.
-	directoryAddr  string
-	packageCounter int                        // Address of the directory service
-	DirectoryInfo  *commons.NodesMap          // Directory information
-	serverID       int                        // Server ID
-	writeChan      chan *commons.Package      // Channel to write packages to files
-	answer         map[int]*commons.StateList // Map of broker IDs to their states
-	packageArray   *queue.RingBuffer          // Array to hold packages
-	dropRate       float64                    // api requests
+	ip                string // IP address of the server
+	port              int    // Port number of the server
+	readerPort        int    //port number of the reader service, the ip remains the same.
+	directoryAddr     string
+	packageCounter    int                        // Address of the directory service
+	DirectoryInfo     *commons.NodesMap          // Directory information
+	serverID          int                        // Server ID
+	writeChan         chan *commons.Package      // Channel to write packages to files
+	answer            map[int]*commons.StateList // Map of broker IDs to their states
+	packageArray      *queue.RingBuffer          // Array to hold packages
+	dropRate          float64                    // api requests
+	packageCountStart int
+	startTimestamp    time.Time
+	mu                sync.RWMutex
 }
 
 // requestPackage sends a request to the server to get a package.
 func (s *Server) requestPackage(serverURL string, brokerID int, pkg *commons.Package) func() error {
 	return func() error {
-		// client := &http.Client{
-		// 	Timeout: commons.SERVER_REQUEST_TIMEOUT,
-		// }
 		client := makeInstrumentedClient("request-package")
 
 		// Create a new HTTP request to request package
 		req, err := http.NewRequest("GET", fmt.Sprintf("%s?brokerID=%d", serverURL, brokerID), nil)
 		if err != nil {
+			logger.Info("oi panic panic requestPackage")
 			panic(err)
 		}
 
@@ -282,14 +294,12 @@ func (s *Server) requestPackage(serverURL string, brokerID int, pkg *commons.Pac
 
 func (s *Server) requestPackageFromStorage(serverURL string, brokerID int, packageID int, pkg *commons.Package) func() error {
 	return func() error {
-		// client := &http.Client{
-		// 	Timeout: commons.SERVER_REQUEST_TIMEOUT,
-		// }
 		client := makeInstrumentedClient("request-package-storage")
 
 		// Create a new HTTP request to request package
 		req, err := http.NewRequest("GET", fmt.Sprintf("%s?brokerID=%d&packageID=%d", serverURL, brokerID, packageID), nil)
 		if err != nil {
+			logger.Info("oi panic panic requestpackage from storage")
 			panic(err)
 		}
 
@@ -332,16 +342,11 @@ func (s *Server) requestPackageFromStorage(serverURL string, brokerID int, packa
 
 func (s *Server) sendPackage(serverURL string, jsonData []byte) func() error {
 	return func() error {
-		// Create an HTTP client with a per-request timeout
-		// client := &http.Client{
-
-		// 	// TODO: Change it to another configurable value.
-		// 	Timeout: commons.SERVER_REQUEST_TIMEOUT,
-		// }
 		client := makeInstrumentedClient("server-send-package")
 
 		req, err := http.NewRequest("POST", serverURL, bytes.NewBuffer(jsonData))
 		if err != nil {
+			logger.Info("oi panic panic sendPackage")
 			panic(err)
 		}
 
@@ -351,10 +356,10 @@ func (s *Server) sendPackage(serverURL string, jsonData []byte) func() error {
 		req.Header.Set("X-NodeType", commons.GetNodeType(commons.ServerType))
 
 		resp, err := client.Do(req)
-
 		if err != nil {
 			return fmt.Errorf("error sending request to %s: %s", serverURL, err)
 		}
+		defer resp.Body.Close()
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return fmt.Errorf("error reading response body: %v", err)
@@ -398,20 +403,38 @@ func (s *Server) requestPackageFromStorageWithRetry(serverURL string, brokerID i
 
 func (s *Server) setupAnswerMap() {
 
-	// reset map before beginning another iteration.
 	for k := range s.DirectoryInfo.BrokerMap.Data {
-		if _, ok := s.answer[k]; ok {
-			if s.answer[k].GetHead().GetState() != commons.IgnoreBroker {
+		s.mu.RLock()
+		sl := s.answer[k]
+		s.mu.RUnlock()
+		if sl == nil {
+			s.mu.Lock()
+			if s.answer[k] == nil { // double-check after acquiring the lock
 				s.answer[k] = commons.NewStateList()
 			}
-		} else {
-			s.answer[k] = commons.NewStateList()
+			sl = s.answer[k]
+			s.mu.Unlock()
 		}
+		head := sl.GetHead()
+		if head == nil || head.GetState() == commons.IgnoreBroker {
+			continue
+		}
+		sl.ReplaceState(&commons.StateValue{State: commons.Undefined, Pkg: nil})
+		// newHead := commons.NewStateNode(&commons.StateValue{
+		//     State: commons.Undefined,
+		// })
+		// sl.UpdateState(head, newHead)
 	}
+
 }
 
 func (s *Server) updateNotReceivedPackage() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, stateList := range s.answer {
+		if stateList == nil {
+			continue
+		}
 		currHead := stateList.GetHead()
 		if currHead.GetState() == commons.Undefined {
 			stateList.UpdateState(currHead,
@@ -424,7 +447,12 @@ func (s *Server) updateNotReceivedPackage() {
 
 func (s *Server) getBrokerList(state int) []int {
 	var brokerList []int
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for brokerID, stateList := range s.answer {
+		if stateList == nil {
+			continue
+		}
 		currHead := stateList.GetHead()
 		if currHead.GetState() == commons.IgnoreBroker {
 			// Ignore the broker if it is in the ignore list
@@ -438,8 +466,16 @@ func (s *Server) getBrokerList(state int) []int {
 	return brokerList
 }
 
+// getStateList safely fetches the StateList for a broker.
+func (s *Server) getStateList(brokerID int) (*commons.StateList, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sl, ok := s.answer[brokerID]
+	return sl, ok && sl != nil
+}
+
 func (s *Server) GetState(brokerID int) *commons.StateNode {
-	stateList, ok := s.answer[brokerID]
+	stateList, ok := s.getStateList(brokerID)
 	if !ok {
 		return nil
 	}
@@ -449,11 +485,19 @@ func (s *Server) GetState(brokerID int) *commons.StateNode {
 }
 
 func (s *Server) writePackage(pkg *commons.Package) error {
-	// Write to file
-	file, err := os.Create(fmt.Sprintf("./packages_%d/pkg_%d_%d.json", s.serverID, pkg.BrokerID, pkg.PackageID))
+	fpath := fmt.Sprintf("./packages_%d/pkg_%d_%d.json", s.serverID, pkg.BrokerID, pkg.PackageID)
 
+	// Check if file already exists
+	if _, err := os.Stat(fpath); err == nil {
+		// File exists -> do nothing
+		logger.Info("File already exists, skipping write", zap.String("filePath", fpath))
+		return nil
+	}
+
+	// Write to file
+	file, err := os.Create(fpath)
 	if err != nil {
-		logger.Error("Failed to create file", zap.String("filePath", fmt.Sprintf("./packages_%d/pkg_%d_%d.json", s.serverID, pkg.BrokerID, pkg.PackageID)), zap.Error(err))
+		logger.Error("Failed to create file", zap.String("filePath", fpath), zap.Error(err))
 		return fmt.Errorf("error creating file: %s", err)
 	}
 	defer file.Close()
@@ -468,20 +512,16 @@ func (s *Server) writePackage(pkg *commons.Package) error {
 	// Write JSON data to file
 	_, err = file.Write(jsonData)
 	if err != nil {
-		logger.Error("Failed to write JSON data to file", zap.String("filePath", fmt.Sprintf("./packages_%d/pkg_%d_%d.json", s.serverID, pkg.BrokerID, pkg.PackageID)), zap.Error(err))
+		logger.Error("Failed to write JSON data to file", zap.String("filePath", fpath), zap.Error(err))
 		return fmt.Errorf("error writing to file: %s", err)
 	}
 
-	logger.Info("Package written to file", zap.String("filePath", fmt.Sprintf("./packages_%d/pkg_%d_%d.json", s.serverID, pkg.BrokerID, pkg.PackageID)), zap.Any("package", pkg))
+	logger.Info("Package written to file", zap.String("filePath", fpath), zap.Any("package", pkg))
 	return nil
 }
 
 func (s *Server) handleAddPackage(w http.ResponseWriter, r *http.Request) {
-
-	// if rand.Float64() < s.dropRate {
-	// 	http.Error(w, "simulated network failure", http.StatusServiceUnavailable)
-	// 	return
-	// }
+	defer r.Body.Close()
 	pkg := &commons.Package{}
 	err := json.NewDecoder(r.Body).Decode(pkg)
 	if err != nil {
@@ -495,6 +535,7 @@ func (s *Server) handleAddPackage(w http.ResponseWriter, r *http.Request) {
 	if currHead == nil {
 		logger.Info("Package is missing")
 		http.Error(w, "Package is missing", http.StatusBadRequest)
+		//http.Error(w, "Package is missing", http.StatusAccepted)
 		return
 	}
 
@@ -505,37 +546,39 @@ func (s *Server) handleAddPackage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if currHead.GetState() == commons.Received {
+		logger.Info("Package is already received", zap.String("brokerID", fmt.Sprintf("%d", pkg.BrokerID)), zap.String("state", fmt.Sprintf("%d", currHead.GetState())))
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if currHead.GetState() == commons.NotReceived {
+		http.Error(w, fmt.Sprintf("broker%d package state is set to NotReceived", pkg.BrokerID), http.StatusBadRequest)
+	}
+
 	if currHead.GetState() == commons.Undefined {
-		// Only allow saving the package if the state is undefined.
-		// if ok := s.answer[pkg.BrokerID].UpdateState(currHead, commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})); ok {
-		// 	s.packageArray.Put(pkg)
-		// 	s.writeChan <- pkg
-		// }
-		// snapshot the values for this iteration
+		sl, ok := s.getStateList(pkg.BrokerID)
+		if !ok {
+			http.Error(w, "Unknown brokerID", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
 		p := pkg
 		h := currHead
 
-		go func(pkg *commons.Package, head *commons.StateNode) {
-			if ok := s.answer[pkg.BrokerID].UpdateState(head,
+		go func(pkg *commons.Package, head *commons.StateNode, sl *commons.StateList) {
+			if ok := sl.UpdateState(head,
 				commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg}),
 			); ok {
 				s.packageArray.Put(pkg)
 				s.writeChan <- pkg
 			}
-		}(p, h)
-		w.WriteHeader(http.StatusOK)
+		}(p, h, sl)
 		return
-	}
-	if currHead.GetState() == commons.NotReceived {
-		http.Error(w, fmt.Sprintf("broker%d package state is set to NotReceived", pkg.BrokerID), http.StatusBadRequest)
 	}
 }
 
 func (s *Server) handleRequestPackage(w http.ResponseWriter, r *http.Request) {
-	// if rand.Float64() < s.dropRate {
-	// 	http.Error(w, "simulated network failure", http.StatusServiceUnavailable)
-	// 	return
-	// }
 	params := r.URL.Query()
 	brokerID := params.Get("brokerID")
 	logger.Info("Received request for package", zap.String("brokerID", brokerID))
@@ -545,8 +588,12 @@ func (s *Server) handleRequestPackage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid brokerID", http.StatusBadRequest)
 		return
 	}
-
-	currHead := s.answer[brokerIDInt].GetHead()
+	sl, ok := s.getStateList(brokerIDInt)
+	if !ok {
+		http.Error(w, "Unknown brokerID", http.StatusNotFound)
+		return
+	}
+	currHead := sl.GetHead()
 	if currHead.GetState() == commons.Received {
 		// We assume that the package is already in the packageArray
 		pkg := currHead.GetPackage()
@@ -559,7 +606,7 @@ func (s *Server) handleRequestPackage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger.Info("Package is not in received state", zap.Int("brokerID", brokerIDInt))
-	http.Error(w, "Package is not present", http.StatusBadRequest)
+	http.Error(w, "Package is not present", http.StatusNotFound)
 }
 
 func (s *Server) handleIgnoreBroker(w http.ResponseWriter, r *http.Request) {
@@ -574,15 +621,20 @@ func (s *Server) handleIgnoreBroker(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid brokerID", http.StatusBadRequest)
 		return
 	}
-
-	currHead := s.answer[brokerIDInt].GetHead()
+	sl, ok := s.getStateList(brokerIDInt)
+	if !ok {
+		http.Error(w, "Unknown brokerID", http.StatusNotFound)
+		return
+	}
+	currHead := sl.GetHead()
 	if currHead.GetState() == commons.NotReceived {
-		if ok := s.answer[brokerIDInt].UpdateState(currHead, commons.NewStateNode(&commons.StateValue{State: commons.IgnoreBroker, Pkg: nil})); !ok {
+		if ok := sl.UpdateState(currHead, commons.NewStateNode(&commons.StateValue{State: commons.IgnoreBroker, Pkg: nil})); !ok {
 			logger.Error("error updating state for brokerID", zap.Int("brokerID", brokerIDInt))
 			http.Error(w, "Error updating state", http.StatusBadRequest)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
+		return
 	}
 	http.Error(w, "Couldn't set broker state to ignoreBroker ", http.StatusBadRequest)
 }
@@ -609,47 +661,47 @@ func (s *Server) handleBrokerOk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if currHead.GetState() == commons.Received {
+		logger.Info("Package is already received", zap.String("brokerID", fmt.Sprintf("%d", brokerIDInt)), zap.String("state", fmt.Sprintf("%d", currHead.GetState())))
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	body, err := io.ReadAll(r.Body)
+	defer r.Body.Close() // Close body after reading
 	if err != nil {
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
-	defer r.Body.Close() // Close body after reading
 	pkg := &commons.Package{}
 	if err := json.Unmarshal(body, pkg); err != nil {
 		logger.Error("error while unmarshalling broker info", zap.Error(err))
 		http.Error(w, "Invalid JSON sent by broker", http.StatusBadRequest)
 		return
 	}
-
+	w.WriteHeader(http.StatusOK)
 	logger.Info("Received package from broker ok request", zap.Int("brokerID", pkg.BrokerID), zap.Int("packageID", pkg.PackageID))
 
-	// if ok := s.answer[pkg.BrokerID].UpdateState(currHead, commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})); ok {
-	// 	// If the package is successfully updated, we put it in the packageArray and write it to the write channel.
-
-	// 	s.packageArray.Put(pkg)
-	// 	s.writeChan <- pkg
-	// }
-	// snapshot the values for this iteration
 	p := pkg
 	h := currHead
 	go func(pkg *commons.Package, head *commons.StateNode) {
-		if ok := s.answer[pkg.BrokerID].UpdateState(head,
-			commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg}),
-		); ok {
-			s.packageArray.Put(pkg)
-			s.writeChan <- pkg
+		if sl, ok := s.getStateList(pkg.BrokerID); ok {
+			head := sl.GetHead()
+			if head != nil && head.GetState() == commons.NotReceived {
+				if sl.UpdateState(sl.GetHead(), commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})) {
+					// if ok := s.answer[brokerID].UpdateState(s.answer[brokerID].GetHead(), commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})); ok {
+					s.packageArray.Put(pkg)
+					s.writeChan <- pkg
+				}
+			}
 		}
 	}(p, h)
+}
 
-	// Write the package to file
-	// TODO: Remove this after testing.
-	// if err := s.writePackage(pkg); err != nil {
-	// 	logger.Error("error writing package to file", zap.String("filePath", fmt.Sprintf("./packages_%d/pkg_%d_%d.json", s.serverID, pkg.BrokerID, pkg.PackageID)), zap.Error(err))
-	// 	http.Error(w, "Error writing package to file", http.StatusInternalServerError)
-	// 	return
-	// }
-	w.WriteHeader(http.StatusOK)
+type registerResp struct {
+	Timestamp   time.Time        `json:"timestamp"` // nanoseconds
+	EpochNumber int64            `json:"epochNumber"`
+	NodesInfo   commons.NodesMap `json:"nodesInfo"`
 }
 
 func (s *Server) registerServer() error {
@@ -679,15 +731,26 @@ func (s *Server) registerServer() error {
 	// Read response
 	body, _ := io.ReadAll(resp.Body)
 
-	if err := json.Unmarshal(body, s.DirectoryInfo); err != nil {
+	var respStruct registerResp
+
+	if err := json.Unmarshal(body, &respStruct); err != nil {
+		logger.Error("Error unmarshalling JSON", zap.Error(err))
 		return fmt.Errorf("error unmarshalling JSON: %v", err)
 	}
 
-	logger.Info("Directory info received", zap.String("directoryInfo", string(body)))
+	//ETime := time.Unix(0, respStruct.Timestamp)
+	ETime := respStruct.Timestamp
+	ENumber := respStruct.EpochNumber
+	s.DirectoryInfo = &respStruct.NodesInfo
 
-	// Since we locking the directory service, we can safely assume that the version is the same as the serverID
+	logger.Info("Directory info received", zap.Any("directoryInfo", s.DirectoryInfo))
 	s.serverID = s.DirectoryInfo.ServerMap.Version
+	s.startTimestamp = ETime
+	s.packageCountStart = int(ENumber)
 	logger.Info("Server registered", zap.Int("serverID", s.serverID))
+	if ENumber > 0 {
+		logger.Info("Server is recovered", zap.Int("serverID", s.serverID))
+	}
 	return nil
 }
 
@@ -695,7 +758,7 @@ func (s *Server) setupServer() (*http.Server, error) {
 	if err := s.registerServer(); err != nil {
 		return nil, fmt.Errorf("error registering broker: %v", err)
 	}
-	err := commons.BroadcastNodesInfo(logger, s.serverID, commons.ServerType, s.DirectoryInfo)
+	err := commons.BroadcastNodesInfo(logger, s.serverID, commons.ServerType, s.DirectoryInfo, sharedTr)
 	if err != nil {
 		logger.Error("error while broadcasting directory info", zap.Error(err))
 	}
@@ -744,10 +807,16 @@ func (s *Server) requestPackages(endpoint string, brokerList []int) {
 					return
 				}
 
-				// If package received, update it as such in the answer array and push it to the package array.
-				if ok := s.answer[brokerID].UpdateState(s.answer[brokerID].GetHead(), commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})); ok {
-					s.packageArray.Put(pkg)
-					s.writeChan <- pkg
+				if sl, ok := s.getStateList(brokerID); ok {
+					head := sl.GetHead()
+					if head != nil && head.GetState() == commons.NotReceived {
+						if sl.UpdateState(sl.GetHead(), commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})) {
+							// if ok := s.answer[brokerID].UpdateState(s.answer[brokerID].GetHead(), commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})); ok {
+							s.packageArray.Put(pkg)
+							s.writeChan <- pkg
+						}
+					}
+
 				}
 
 				logger.Info("Received package from server", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Any("package", pkg))
@@ -773,9 +842,9 @@ func (s *Server) requestPackagesFromStorage(endpoint string, brokerList []int) {
 			go func(serverID int) {
 				defer wg.Done()
 				serverURL := fmt.Sprintf("http://%s:%d%s", serverMap.Data[serverID].IP, serverMap.Data[serverID].ReaderPort, endpoint)
-				currHead := s.answer[brokerID].GetHead()
-				logger.Info("State state state", zap.Any("ans", s.answer))
-				logger.Info("State state state", zap.Any("currhead", currHead))
+				//currHead := s.answer[brokerID].GetHead()
+				// logger.Info("State state state", zap.Any("ans", s.answer))
+				// logger.Info("State state state", zap.Any("currhead", currHead))
 				packageID := s.packageCounter
 				// if currHead != nil {
 				// 	packageID = currHead.GetPackage().PackageID
@@ -785,11 +854,17 @@ func (s *Server) requestPackagesFromStorage(endpoint string, brokerList []int) {
 					logger.Error("error while requesting package", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Error(err))
 					return
 				}
-
 				// If package received, update it as such in the answer array and push it to the package array.
-				if ok := s.answer[brokerID].UpdateState(s.answer[brokerID].GetHead(), commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})); ok {
-					s.packageArray.Put(pkg)
-					s.writeChan <- pkg
+				if sl, ok := s.getStateList(brokerID); ok {
+					head := sl.GetHead()
+					if head != nil && head.GetState() == commons.NotReceived {
+						if sl.UpdateState(head, commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})) {
+							// if ok := s.answer[brokerID].UpdateState(s.answer[brokerID].GetHead(), commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})); ok {
+							s.packageArray.Put(pkg)
+							s.writeChan <- pkg
+						}
+					}
+
 				}
 
 				logger.Info("Received package from server", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Any("package", pkg))
@@ -801,12 +876,10 @@ func (s *Server) requestPackagesFromStorage(endpoint string, brokerList []int) {
 
 func (s *Server) sendIgnoreBroker(serverURL string) func() error {
 	return func() error {
-		// client := &http.Client{
-		// 	Timeout: commons.SERVER_REQUEST_TIMEOUT,
-		// }
 		client := makeInstrumentedClient("send-ignore-broker")
 		req, err := http.NewRequest("POST", serverURL, nil)
 		if err != nil {
+			logger.Info("oi panic panic send ignore broker")
 			panic(err)
 		}
 
@@ -824,20 +897,23 @@ func (s *Server) sendIgnoreBroker(serverURL string) func() error {
 	}
 }
 
-func (s *Server) sendBrokerOkWithRetry(serverURL string, pkg *commons.Package) error {
-	// Encode package to JSON
-	jsonData, err := json.Marshal(pkg)
-	if err != nil {
-		logger.Error("Failed to encode package to JSON", zap.Error(err))
-		return fmt.Errorf("error encoding JSON: %s", err)
-	}
+func (s *Server) sendBrokerOkWithRetry(serverURL string, jsonData []byte, brokerid int) error {
 	return retry.Do(
 		s.sendPackage(serverURL, jsonData),
-		retry.Attempts(2),                 // Number of retry attempts
-		retry.Delay(0),                    // No delay
-		retry.DelayType(retry.FixedDelay), // Use fixed delay strategy
+		retry.Attempts(commons.SERVER_RETRY),
+		retry.Delay(1*time.Millisecond),
+		retry.DelayType(retry.CombineDelay(
+			retry.BackOffDelay, // exponential backoff
+			retry.RandomDelay,  // add jitter
+		)),
+		retry.MaxDelay(5*time.Millisecond),
 		retry.OnRetry(func(n uint, err error) {
-			logger.Error("Retrying broker ok request", zap.String("serverURL", serverURL), zap.Int("brokerID", pkg.BrokerID), zap.Int("attempt", int(n)+1), zap.Error(err))
+			logger.Error("Retrying broker ok request",
+				zap.String("serverURL", serverURL),
+				zap.Int("brokerID", brokerid),
+				zap.Int("attempt", int(n)+1),
+				zap.Error(err),
+			)
 		}),
 	)
 }
@@ -856,24 +932,42 @@ func (s *Server) sendIgnoreBrokerWithRetry(serverURL string) error {
 
 func (s *Server) sendBrokerOkRequests(brokerList []int) {
 	var wg sync.WaitGroup
+	serverMap := s.DirectoryInfo.ServerMap
 	for _, brokerID := range brokerList {
-		brokerID := brokerID
-		serverMap := s.DirectoryInfo.ServerMap
+		sl, ok := s.getStateList(brokerID)
+		if !ok {
+			continue
+		}
+		// s.mu.RLock()
+		// sl := s.answer[brokerID]
+		// s.mu.RUnlock()
+		if sl == nil {
+			continue
+		}
+		currHead := sl.GetHead()
+		if currHead == nil || currHead.GetState() != commons.Received {
+			continue
+		}
+		pkg := currHead.GetPackage()
+		if pkg == nil {
+			continue
+		}
+
+		jsonData, err := json.Marshal(pkg)
+		if err != nil {
+			logger.Error("Failed to encode package to JSON", zap.Error(err))
+			continue
+		}
 		for serverID := range serverMap.Data {
 			// Skip the current server
 			if serverID == s.serverID {
 				continue
 			}
-
-			currHead := s.answer[brokerID].GetHead()
-			pkg := currHead.GetPackage()
-
-			serverID := serverID
 			serverURL := fmt.Sprintf("http://%s:%d%s?brokerID=%d", serverMap.Data[serverID].IP, serverMap.Data[serverID].Port, commons.SERVER_BROKER_OK, brokerID)
 			wg.Add(1)
 			go func(serverURL string, brokerID int) {
 				defer wg.Done()
-				err := s.sendBrokerOkWithRetry(serverURL, pkg)
+				err := s.sendBrokerOkWithRetry(serverURL, jsonData, brokerID)
 				if err != nil {
 					logger.Error("error while sending ignore broker request", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Error(err))
 					return
@@ -926,14 +1020,12 @@ func (s *Server) sendCurrentServerIDWithRetry(serverURL string) error {
 
 func (s *Server) sendServerID(serverURL string) func() error {
 	return func() error {
-		// client := &http.Client{
-		// 	Timeout: commons.SERVER_REQUEST_TIMEOUT,
-		// }
 		client := makeInstrumentedClient("send-server-id")
 
 		// Create a new HTTP request to request package
 		req, err := http.NewRequest("GET", serverURL, nil)
 		if err != nil {
+			logger.Info("oi panic panic sendServerID")
 			panic(err)
 		}
 
@@ -947,6 +1039,7 @@ func (s *Server) sendServerID(serverURL string) func() error {
 			logger.Error("Error sending request to send ID", zap.String("serverURL", serverURL), zap.Error(err))
 			return fmt.Errorf("error sending request to send ID: %s", err)
 		}
+		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusOK {
 			// Process the package
@@ -971,23 +1064,33 @@ func (s *Server) sendCurrentServerID() {
 			logger.Error("error while sending id to read server", zap.String("serverURL", serverURL), zap.Error(err))
 			return
 		}
-		logger.Info("Ignore broker request sent to server", zap.String("serverURL", serverURL))
+		logger.Info("Sent current server ID to read server", zap.String("serverURL", serverURL))
 	}(serverURL)
 	wg.Wait()
 }
 
-func (s *Server) protocolDaemon(nextRun time.Time) {
+func (s *Server) protocolDaemon(ctx context.Context, nextRun time.Time) {
 	// Daemon routine to run the protocol every epoch period.
-	s.packageCounter = 0
+	s.packageCounter = s.packageCountStart
 	// We want the ticker to have millisecond precision
-	ticker := time.NewTicker(time.Millisecond)
+	//ticker := time.NewTicker(time.Millisecond)
 	logger.Info("Protocol Daemon started")
+	logger.Info("Next run will happen at: ", zap.Time("nextRun", nextRun))
 
-	logger.Info("Next run will happen at: %s", zap.Time("nextRun", nextRun))
-
-	for tc := range ticker.C {
-		if tc.Before(nextRun) {
-			continue
+	for {
+		// Sleep (efficiently) until the next deadline or until we're asked to stop
+		if d := time.Until(nextRun); d > 0 {
+			t := time.NewTimer(d)
+			select {
+			case <-t.C:
+				// time to run
+			case <-ctx.Done():
+				t.Stop()
+				logger.Info("Protocol daemon: context cancelled before next run")
+				return
+			}
+		} else {
+			// If we’re late (e.g., long previous work or clock jump), run immediately
 		}
 
 		waitPackage := nextRun.Add(commons.WAIT_FOR_BROKER_PACKAGE)
@@ -998,30 +1101,29 @@ func (s *Server) protocolDaemon(nextRun time.Time) {
 		}
 		s.packageCounter++
 		epochNumber.WithLabelValues().Set(float64(s.packageCounter))
-		start_time := time.Now()
-		timer := prometheus.NewTimer(protocolDuration.WithLabelValues())
-		err := commons.BroadcastNodesInfo(logger, s.serverID, commons.ServerType, s.DirectoryInfo)
+		start := time.Now()
+		promTimer := prometheus.NewTimer(protocolDuration.WithLabelValues())
+		err := commons.BroadcastNodesInfo(logger, s.serverID, commons.ServerType, s.DirectoryInfo, sharedTr)
 		if err != nil {
 			logger.Error("error while broadcasting directory info", zap.Error(err))
 		}
-		// Setup the answer map for fresh epoch.
-		// s.setupAnswerMap()
-		// s.packageCounter++
-		// err := commons.BroadcastNodesInfo(logger, s.serverID, commons.ServerType, s.DirectoryInfo)
-		// if err != nil {
-		// 	logger.Error("error while broadcasting directory info", zap.Error(err))
-		// }
 
 		logger.Info("Step 1: Answer map is setup, waiting for packages...")
 
-		// Wait for Brokers to send packages.
-
-		// We do this instead of time.After because we don't know how long the Broadcast Nodes Info will take.
-		for innerTc := range ticker.C {
-			if innerTc.Equal(waitPackage) || innerTc.After(waitPackage) {
-				break
+		// Wait for brokers until 'waitPackage' without polling
+		if d := time.Until(waitPackage); d > 0 {
+			t := time.NewTimer(d)
+			select {
+			case <-t.C:
+				// done waiting
+			case <-ctx.Done():
+				t.Stop()
+				logger.Info("Protocol daemon: context cancelled during wait")
+				promTimer.ObserveDuration()
+				return
 			}
 		}
+
 		logger.Info("Waiting time is up, checking for received packages...")
 
 		// Update the state of packages that are not received.
@@ -1039,23 +1141,29 @@ func (s *Server) protocolDaemon(nextRun time.Time) {
 		logger.Info("Missing Packages", zap.Any("list", pendingBrokerList))
 
 		logger.Info("Step 3: Requesting packages from storage of other servers...")
-		logger.Info("Missing Packages", zap.Any("list", pendingBrokerList))
-		// ANAND TODO: call new service here
 		s.requestPackagesFromStorage(commons.SERVER_READ_STORAGE, pendingBrokerList)
 
+		logger.Info("Step 4 : Sending broker ok request to other with servers ( with packages )")
 		pendingBrokerList = s.getBrokerList(commons.NotReceived)
 		completedBrokerList := s.getBrokerList(commons.Received)
-
-		brokerPackagesFromServer := findSetDifference(firstPendingBrokerList, completedBrokerList)
-		logger.Info("Step 4 : Sending broker ok request to other with servers ( with packages )")
+		logger.Info("Missing Packages", zap.Any("list", pendingBrokerList))
+		// below 2 lines are where the problem's at
+		brokerPackagesFromServer := findSetDifference(firstPendingBrokerList, pendingBrokerList)
+		logger.Info("brokerOk list", zap.Any("list", brokerPackagesFromServer))
 		s.sendBrokerOkRequests(brokerPackagesFromServer)
 
+		// TODO : check this
+		pendingBrokerList = s.getBrokerList(commons.NotReceived)
 		logger.Info("Complete Packages", zap.Any("list", completedBrokerList))
 		for _, brokerID := range pendingBrokerList {
-			if s.answer[brokerID].GetHead().GetState() == commons.NotReceived {
-				// We want to ignore the broker if the package is not received.
-				if ok := s.answer[brokerID].UpdateState(s.answer[brokerID].GetHead(), commons.NewStateNode(&commons.StateValue{State: commons.IgnoreBroker, Pkg: nil})); ok {
-					logger.Info("Ignoring broker", zap.Int("brokerID", brokerID))
+			if sl, ok := s.getStateList(brokerID); ok {
+				head := sl.GetHead()
+				if head != nil && head.GetState() == commons.NotReceived {
+					//if s.answer[brokerID].GetHead().GetState() == commons.NotReceived {
+					// We want to ignore the broker if the package is not received.
+					if ok := sl.UpdateState(head, commons.NewStateNode(&commons.StateValue{State: commons.IgnoreBroker, Pkg: nil})); ok {
+						logger.Info("Ignoring broker", zap.Int("brokerID", brokerID))
+					}
 				}
 			}
 		}
@@ -1063,13 +1171,21 @@ func (s *Server) protocolDaemon(nextRun time.Time) {
 		// Send ignore broker requests to other servers.
 		logger.Info("Sending ignore broker requests to other servers for brokers", zap.Any("brokers", pendingBrokerList))
 		s.sendIgnoreBrokerRequests(pendingBrokerList)
-		timer.ObserveDuration()
-		duration := time.Since(start_time).Seconds()
-		epochDuration.WithLabelValues(strconv.Itoa(s.packageCounter)).Set(duration)
+		promTimer.ObserveDuration()
+		duration := time.Since(start).Seconds()
+		epochDuration1.WithLabelValues(strconv.Itoa(s.packageCounter)).Set(duration)
+		epochDuration.Set(duration)
+		curLen := s.packageArray.Len()
 		logger.Info("Protocol Completed")
+		logger.Info("Cur package array length: ", zap.Uint64("curLen", curLen))
+		logger.Info("Time time time: ", zap.Float64("duration", duration))
 		logger.Info("setting up answer map for next epoch")
 		s.setupAnswerMap()
-		logger.Info("Next run will happen at: %s", zap.Time("nextRun", nextRun))
+		logger.Info("Next run will happen at: ", zap.Time("nextRun", nextRun))
+		if s.packageCounter == 500 {
+			logger.Info("5000 epochs done, ending experiment")
+			return
+		}
 	}
 }
 
@@ -1090,8 +1206,8 @@ func main() {
 	flag.IntVar(&serverPort, "serverPort", 0, "Port of Server")
 	flag.IntVar(&readerPort, "readerPort", 0, "Port of Reader Service")
 
-	var startTimestamp int64
-	flag.Int64Var(&startTimestamp, "startTimestamp", 0, "Start timestamp")
+	// var startTimestamp int64
+	// flag.Int64Var(&startTimestamp, "startTimestamp", 0, "Start timestamp")
 
 	var dropRate float64
 	flag.Float64Var(&dropRate, "dropRate", 0, "drop rate")
@@ -1126,19 +1242,10 @@ func main() {
 		return
 	}
 
-	if startTimestamp == 0 {
-		fmt.Printf("startTimestamp is required")
-		return
-	}
-
-	// err := os.Mkdir("./logs", 0755)
-	// if err != nil {
-	// 	fmt.Printf("failed to create logs directory: %v", err)
-	// 	return
-	// }
 	err := os.Mkdir("./logs", 0755)
 	if err != nil && !os.IsExist(err) {
 		// Only log or handle real errors
+		logger.Info("oi panic panic mkdir")
 		panic(err)
 	}
 	lumberjackLogger := &lumberjack.Logger{
@@ -1198,23 +1305,33 @@ func main() {
 	// start new service
 	// send ID to our reader service
 	server.sendCurrentServerID()
-	go func() {
-		server.protocolDaemon(time.Unix(0, startTimestamp))
-		defer fmt.Println("Daemon routine stopped.")
-	}()
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt)
-	<-quit
-
-	logger.Info("\nShutting down server...")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	httpServer.Shutdown(ctx)
-	logger.Info("Server stopped.")
+	sigs := make(chan os.Signal, 4)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	go func() {
+		for s := range sigs {
+			logger.Warn("received signal", zap.String("sig", s.String()))
+			cancel()
+			return
+		}
+	}()
+
+	go server.protocolDaemon(ctx, server.startTimestamp)
+
+	// Block until context is cancelled
+	<-ctx.Done()
+
+	// Graceful shutdown
+	logger.Info("Shutting down server...")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		logger.Error("HTTP shutdown error", zap.Error(err))
+	}
 	close(server.writeChan)
+	logger.Info("Server stopped.")
+
 }

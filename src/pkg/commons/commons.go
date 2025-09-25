@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -22,7 +21,7 @@ const (
 	BROKER_REQUEST_TIMEOUT  = 5 * time.Millisecond
 	SERVER_REQUEST_TIMEOUT  = 5 * time.Millisecond
 	BROKER_RETRY            = 5
-	SERVER_RETRY            = 5
+	SERVER_RETRY            = 3
 )
 
 type NodeInfo struct {
@@ -141,35 +140,40 @@ func HandleUpdateDirectory(logger *zap.Logger, directoryInfo *NodesMap) func(w h
 			nodeID = "unknown"
 		}
 		logger.Info("Received update directory request", zap.String("nodeType", nodeType), zap.String("nodeID", nodeID))
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "Error reading request body", http.StatusBadRequest)
-			return
-		}
-		defer r.Body.Close()
+		w.WriteHeader(http.StatusOK)
+		// body, err := io.ReadAll(r.Body)
+		// if err != nil {
+		// 	http.Error(w, "Error reading request body", http.StatusBadRequest)
+		// 	return
+		// }
+		// defer r.Body.Close()
 
 		// Process the data
-		newDirectoryMap := &NodesMap{}
-		if err := json.Unmarshal(body, &newDirectoryMap); err != nil {
-			logger.Error("Error unmarshalling JSON", zap.Error(err))
-			http.Error(w, "Error unmarshalling JSON", http.StatusBadRequest)
+		newDirectoryMap := NodesMap{}
+		// if err := json.Unmarshal(body, &newDirectoryMap); err != nil {
+		// 	logger.Error("Error unmarshalling JSON", zap.Error(err))
+		// 	http.Error(w, "Error unmarshalling JSON", http.StatusBadRequest)
+		// 	return
+		// }
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&newDirectoryMap); err != nil {
+			logger.Warn("update decode failed",
+				zap.String("nodeType", nodeType), zap.String("nodeID", nodeID), zap.Error(err))
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
 			return
 		}
 
-		// //directoryInfo.CheckAndUpdateMap(newDirectoryMap)
-		// go func() {
-		// 	directoryInfo.CheckAndUpdateMap(newDirectoryMap)
-		// }()
+		// w.WriteHeader(http.StatusOK)
 		ndm := newDirectoryMap
 		go func(m *NodesMap) {
 			directoryInfo.CheckAndUpdateMap(m)
-		}(ndm)
+		}(&ndm)
 
-		w.WriteHeader(http.StatusOK)
 	}
 }
 
-func BroadcastNodesInfo(logger *zap.Logger, currNodeID int, currNodeType int, directoryInfo *NodesMap) error {
+func BroadcastNodesInfo(logger *zap.Logger, currNodeID int, currNodeType int, directoryInfo *NodesMap, sharedTransport *http.Transport) error {
 	var wg sync.WaitGroup
 	jsonData, err := json.Marshal(directoryInfo)
 	if err != nil {
@@ -189,7 +193,8 @@ func BroadcastNodesInfo(logger *zap.Logger, currNodeID int, currNodeType int, di
 			defer wg.Done()
 
 			client := &http.Client{
-				Timeout: BROADCAST_TIMEOUT,
+				Transport: sharedTransport,
+				Timeout:   BROADCAST_TIMEOUT,
 			}
 
 			req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, BROKER_UPDATE_DIRECTORY), bytes.NewBuffer(jsonData))
@@ -226,7 +231,8 @@ func BroadcastNodesInfo(logger *zap.Logger, currNodeID int, currNodeType int, di
 			defer wg.Done()
 
 			client := &http.Client{
-				Timeout: BROADCAST_TIMEOUT,
+				Transport: sharedTransport,
+				Timeout:   BROADCAST_TIMEOUT,
 			}
 
 			req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, SERVER_UPDATE_DIRECTORY), bytes.NewBuffer(jsonData))

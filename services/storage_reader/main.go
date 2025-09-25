@@ -85,7 +85,7 @@ func (s *ReadingServer) handleReadPackageStorage(w http.ResponseWriter, r *http.
 	}
 
 	// Perform necessary operations with packageID and brokerID
-	w.WriteHeader(http.StatusOK)
+	//w.WriteHeader(http.StatusOK)
 }
 
 func (s *ReadingServer) handleRegisterID(w http.ResponseWriter, r *http.Request) {
@@ -166,11 +166,6 @@ func main() {
 		return
 	}
 
-	// err := os.Mkdir("./logs", 0755)
-	// if err != nil {
-	// 	fmt.Printf("failed to create logs directory: %v", err)
-	// 	return
-	// }
 	err := os.Mkdir("./logs", 0755)
 	if err != nil && !os.IsExist(err) {
 		// Only log or handle real errors
