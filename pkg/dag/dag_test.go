@@ -240,3 +240,329 @@ func TestDoubleEdgedLoop(t *testing.T) {
 		}
 	}
 }
+
+func TestMultiLoop(t *testing.T) {
+	counter := 1
+	txs := []*commons.Transaction{
+		{
+			Id: 0, 
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "K01", Value: "val1"},
+				{Op: 1, Key: "K03", Value: "val1"},
+				{Op: 1, Key: "K04", Value: "val1"},
+				{Op: 3, Key: "K10", Value: ""},
+				{Op: 3, Key: "K30", Value: ""},
+				{Op: 3, Key: "K40", Value: ""},
+			},
+			Timestamp: int64(0),
+		},
+		{
+			Id: 1,
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "K01", Value: ""},
+				{Op: 3, Key: "K21", Value: ""},
+				{Op: 1, Key: "K10", Value: "val1"},
+				{Op: 1, Key: "K12", Value: "val1"},
+			},
+			Timestamp: int64(0),
+		},
+		{
+			Id: 2,
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "K21", Value: "val1"},
+				{Op: 1, Key: "K23", Value: "val1"},
+				{Op: 3, Key: "K32", Value: ""},
+				{Op: 3, Key: "K12", Value: ""},
+			},
+			Timestamp: int64(0),
+		},
+		{
+			Id: 3,
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "K03", Value: ""},
+				{Op: 3, Key: "K23", Value: ""},
+				{Op: 3, Key: "K43", Value: ""},
+				{Op: 1, Key: "K32", Value: "val1"},
+				{Op: 1, Key: "K30", Value: "val1"},
+				{Op: 1, Key: "K34", Value: "val1"},
+			},
+			Timestamp: int64(0),
+		},
+		{
+			Id: 4,
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "K04", Value: ""},
+				{Op: 3, Key: "K34", Value: ""},
+				{Op: 1, Key: "K40", Value: "val1"},
+				{Op: 1, Key: "K43", Value: "val1"},
+			},
+			Timestamp: int64(0),
+		},
+	}
+	expectedTxs := []*commons.Transaction{
+		{
+			Id: 0, 
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "K01", Value: "val1"},
+				{Op: 1, Key: "K03", Value: "val1"},
+				{Op: 1, Key: "K04", Value: "val1"},
+				{Op: 3, Key: "K10", Value: ""},
+				{Op: 3, Key: "K30", Value: ""},
+				{Op: 3, Key: "K40", Value: ""},
+			},
+			Timestamp: int64(1),
+		},
+		{
+			Id: 1,
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "K01", Value: ""},
+				{Op: 3, Key: "K21", Value: ""},
+				{Op: 1, Key: "K10", Value: "val1"},
+				{Op: 1, Key: "K12", Value: "val1"},
+			},
+			Timestamp: int64(4),
+		},
+		{
+			Id: 2,
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "K21", Value: "val1"},
+				{Op: 1, Key: "K23", Value: "val1"},
+				{Op: 3, Key: "K32", Value: ""},
+				{Op: 3, Key: "K12", Value: ""},
+			},
+			Timestamp: int64(2),
+		},
+		{
+			Id: 3,
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "K03", Value: ""},
+				{Op: 3, Key: "K23", Value: ""},
+				{Op: 3, Key: "K43", Value: ""},
+				{Op: 1, Key: "K32", Value: "val1"},
+				{Op: 1, Key: "K30", Value: "val1"},
+				{Op: 1, Key: "K34", Value: "val1"},
+			},
+			Timestamp: int64(3),
+		},
+		{
+			Id: 4,
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "K04", Value: ""},
+				{Op: 3, Key: "K34", Value: ""},
+				{Op: 1, Key: "K40", Value: "val1"},
+				{Op: 1, Key: "K43", Value: "val1"},
+			},
+			Timestamp: int64(5),
+		},
+	}
+	normalOut,err := Schedule(txs,&counter)
+	if err!=nil {
+		t.Errorf("Error in scheduling: %s",err)
+	}
+
+	if !reflect.DeepEqual(txs, expectedTxs) {
+		t.Errorf("Expected scheduled map to be %#v, got %#v", expectedTxs,txs)
+	}
+	ordering := ExecuteParallel(txs, normalOut)
+	t.Log(ordering)
+	for i:=0 ; i<len(ordering); i++{
+		for j:=i+1 ; j<len(ordering); j++{
+			u:=ordering[i]
+			v:=ordering[j]
+			t.Logf("Checking edge from %d to %d",v,u)
+			if _,ok:=normalOut[v][u];ok {
+				t.Errorf("Unexpected edge from %d to %d in normalOut found",v,u)
+			}
+		}
+	}
+}
+
+func TestIdealWithMultiLoop(t *testing.T) {
+	counter := 1
+	txs := []*commons.Transaction{
+		{
+			Id: 0, 
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "K20", Value: ""},
+			},
+			Timestamp: int64(0),
+		},
+		{
+			Id: 1,
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "K21", Value: ""},
+			},
+			Timestamp: int64(0),
+		},
+		{
+			Id: 2,
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "K20", Value: "val1"},
+				{Op: 1, Key: "K21", Value: "val1"},
+				{Op: 1, Key: "K23", Value: "val1"},
+				{Op: 1, Key: "K24", Value: "val1"},
+				{Op: 1, Key: "K25", Value: "val1"},
+				{Op: 3, Key: "K32", Value: ""},
+				{Op: 3, Key: "K42", Value: ""},
+				{Op: 3, Key: "K52", Value: ""},
+			},
+			Timestamp: int64(0),
+		},
+		{
+			Id: 3,
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "K32", Value: "val1"},
+				{Op: 1, Key: "K34", Value: "val1"},
+				{Op: 1, Key: "K35", Value: "val1"},
+				{Op: 3, Key: "K23", Value: ""},
+				{Op: 3, Key: "K43", Value: ""},
+				{Op: 3, Key: "K53", Value: ""},
+			},
+			Timestamp: int64(0),
+		},
+		{
+			Id: 4,
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "K42", Value: "val1"},
+				{Op: 1, Key: "K43", Value: "val1"},
+				{Op: 1, Key: "K45", Value: "val1"},
+				{Op: 1, Key: "K46", Value: "val1"},
+				{Op: 1, Key: "K47", Value: "val1"},
+				{Op: 3, Key: "K24", Value: ""},
+				{Op: 3, Key: "K34", Value: ""},
+				{Op: 3, Key: "K54", Value: ""},
+			},
+			Timestamp: int64(0),
+		},
+		{
+			Id: 5,
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "K52", Value: "val1"},
+				{Op: 1, Key: "K53", Value: "val1"},
+				{Op: 1, Key: "K54", Value: "val1"},
+				{Op: 3, Key: "K35", Value: ""},
+				{Op: 3, Key: "K45", Value: ""},
+				{Op: 3, Key: "K25", Value: ""},
+			},
+			Timestamp: int64(0),
+		},
+		{
+			Id: 6,
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "K46", Value: ""},
+
+			},
+			Timestamp: int64(0),
+		},
+		{
+			Id: 7,
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "K47", Value: ""},
+			},
+			Timestamp: int64(0),
+		},
+	}
+	expectedTxs := []*commons.Transaction{
+		{
+			Id: 0, 
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "K20", Value: ""},
+			},
+			Timestamp: int64(1),
+		},
+		{
+			Id: 1,
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "K21", Value: ""},
+			},
+			Timestamp: int64(2),
+		},
+		{
+			Id: 2,
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "K20", Value: "val1"},
+				{Op: 1, Key: "K21", Value: "val1"},
+				{Op: 1, Key: "K23", Value: "val1"},
+				{Op: 1, Key: "K24", Value: "val1"},
+				{Op: 1, Key: "K25", Value: "val1"},
+				{Op: 3, Key: "K32", Value: ""},
+				{Op: 3, Key: "K42", Value: ""},
+				{Op: 3, Key: "K52", Value: ""},
+			},
+			Timestamp: int64(5),
+		},
+		{
+			Id: 3,
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "K32", Value: "val1"},
+				{Op: 1, Key: "K34", Value: "val1"},
+				{Op: 1, Key: "K35", Value: "val1"},
+				{Op: 3, Key: "K23", Value: ""},
+				{Op: 3, Key: "K43", Value: ""},
+				{Op: 3, Key: "K53", Value: ""},
+			},
+			Timestamp: int64(6),
+		},
+		{
+			Id: 4,
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "K42", Value: "val1"},
+				{Op: 1, Key: "K43", Value: "val1"},
+				{Op: 1, Key: "K45", Value: "val1"},
+				{Op: 1, Key: "K46", Value: "val1"},
+				{Op: 1, Key: "K47", Value: "val1"},
+				{Op: 3, Key: "K24", Value: ""},
+				{Op: 3, Key: "K34", Value: ""},
+				{Op: 3, Key: "K54", Value: ""},
+			},
+			Timestamp: int64(7),
+		},
+		{
+			Id: 5,
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "K52", Value: "val1"},
+				{Op: 1, Key: "K53", Value: "val1"},
+				{Op: 1, Key: "K54", Value: "val1"},
+				{Op: 3, Key: "K35", Value: ""},
+				{Op: 3, Key: "K45", Value: ""},
+				{Op: 3, Key: "K25", Value: ""},
+			},
+			Timestamp: int64(8),
+		},
+		{
+			Id: 6,
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "K46", Value: ""},
+
+			},
+			Timestamp: int64(3),
+		},
+		{
+			Id: 7,
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "K47", Value: ""},
+			},
+			Timestamp: int64(4),
+		},
+	}
+	normalOut,err := Schedule(txs,&counter)
+	if err!=nil {
+		t.Errorf("Error in scheduling: %s",err)
+	}
+
+	if !reflect.DeepEqual(txs, expectedTxs) {
+		t.Errorf("Expected scheduled map to be %#v, got %#v", expectedTxs,txs)
+	}
+	ordering := ExecuteParallel(txs, normalOut)
+	t.Log(ordering)
+	for i:=0 ; i<len(ordering); i++{
+		for j:=i+1 ; j<len(ordering); j++{
+			u:=ordering[i]
+			v:=ordering[j]
+			t.Logf("Checking edge from %d to %d",v,u)
+			if _,ok:=normalOut[v][u];ok {
+				t.Errorf("Unexpected edge from %d to %d in normalOut found",v,u)
+			}
+		}
+	}
+}

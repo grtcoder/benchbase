@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"lockfreemachine/pkg/commons"
-	"sync"
 	"sync/atomic"
 )
 
@@ -29,17 +28,19 @@ func executeTransaction(tx *commons.Transaction) {
 
 func ExecuteParallel(txs []*commons.Transaction, normalOut map[int]map[int]bool) []int {
 	n := len(txs)
-	inDegree := make(map[int]int)
+	inDegree := make(map[int]*atomic.Int32)
+	for i := 0; i < n; i++ {
+		inDegree[i] = &atomic.Int32{}
+	}
 	for u := range normalOut {
 		for v := range normalOut[u] {
-			inDegree[v]++
+			inDegree[v].Add(1)
 		}
 	}
 
-	var mu sync.Mutex
 	readyCh := make(chan int, n)
 	for i := 0; i < n; i++ {
-		if inDegree[i] == 0 {
+		if inDegree[i].Load() == 0 {
 			readyCh <- i
 		}
 	}
@@ -48,25 +49,23 @@ func ExecuteParallel(txs []*commons.Transaction, normalOut map[int]map[int]bool)
 	// Spawn worker goroutines
 	var numProcessed atomic.Int64
 	for txID := range readyCh {
+		ordering=append(ordering,txID)
 				go func(txID int) {
 					executeTransaction(txs[txID])
 					numProcessed.Add(1)
 					// Record execution order
-					ordering=append(ordering,txID)
-						mu.Lock()
 						for v := range normalOut[txID] {
-							inDegree[v]--
-							if inDegree[v] == 0 {
+							inDegree[v].Add(-1)
+							if inDegree[v].Load() == 0 {
 								readyCh <- v
 							}
 						}
-						mu.Unlock()
 						if int(numProcessed.Load()) == n {
 							close(readyCh)
 						}
 				}(txID)
 	}
-	
+
 	return ordering
 }
 
