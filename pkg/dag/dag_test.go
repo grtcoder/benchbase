@@ -1,9 +1,11 @@
 package dag
 
 import (
+	"fmt"
+	"lockfreemachine/pkg/commons"
+	"math/rand"
 	"reflect"
 	"testing"
-	"lockfreemachine/pkg/commons"
 )
 
 func TestBasic(t *testing.T) {
@@ -565,4 +567,77 @@ func TestIdealWithMultiLoop(t *testing.T) {
 			}
 		}
 	}
+}
+
+func generateRandomTransactions(graph map[int]map[int]struct{}, n int64) []*commons.Transaction {
+	// Implementation for generating random transactions based on the graph and number of transactions
+	txs := []*commons.Transaction{}
+	for i := int64(0); i < n; i++ {
+		txs = append(txs, &commons.Transaction{
+			Id: i,
+			Operations: nil,
+			Timestamp: int64(0),
+		})
+	}
+	for from, edges := range graph {
+		for to := range edges {
+			txs[from].Operations = append(txs[from].Operations, &commons.Operation{
+				Op: 1,
+				Key: fmt.Sprintf("K%d%d", from, to),
+				Value: "val",
+			})
+			txs[to].Operations = append(txs[to].Operations, &commons.Operation{
+				Op: 3,
+				Key: fmt.Sprintf("K%d%d", from, to),
+				Value: "",
+			})
+		}
+	}
+	return txs
+}
+func generateRandomGraph(n int64, edgeProb float64) map[int]map[int]struct{} {
+	// Implementation for generating a random graph with n nodes and edge probability edgeProb
+	graph := make(map[int]map[int]struct{})
+	for i := int64(0); i < n; i++ {
+		graph[int(i)] = make(map[int]struct{})
+		for j := int64(0); j < n; j++ {
+			if rand.Float64() < edgeProb {
+				if graph[int(i)] == nil {
+					graph[int(i)] = make(map[int]struct{})
+				}
+				graph[int(i)][int(j)] = struct{}{}
+			}
+			graph[int(i)] = make(map[int]struct{})
+		}
+	}
+	// Add edges based on edgeProb
+	return graph
+}
+
+func TestRandomGraph(t *testing.T){
+	counter := 1
+	n := int64(1000)
+	edgeProb := 0.1
+	graph := generateRandomGraph(n, edgeProb)
+	txs := generateRandomTransactions(graph, n)
+	normalOut,err := Schedule(txs,&counter)
+	if err!=nil {
+		t.Errorf("Error in scheduling: %s",err)
+	}
+
+	for i:=0 ; i<int(n); i++ {
+		for j,_ := range graph[i] {
+			if _,ok := graph[i][j];ok {
+				// Dependency is resolved by setting timestamps.
+				if txs[i].Timestamp > txs[j].Timestamp {
+					continue
+				}
+				if _,ok := normalOut[i][j]; !ok {
+					t.Errorf("Expected edge from %d to %d in normalOut not found",i,j)
+				}
+			}
+		}
+	}
+
+	// Loop check for DAG
 }
