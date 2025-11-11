@@ -9,17 +9,11 @@ scrape_configs:
       - targets:
           - "broker1.anand-test.l-free-machine.emulab.net:8083"
           - "broker2.anand-test.l-free-machine.emulab.net:8083"
-          - "broker3.anand-test.l-free-machine.emulab.net:8083"
-          - "broker4.anand-test.l-free-machine.emulab.net:8083"
-          - "broker5.anand-test.l-free-machine.emulab.net:8083"
         labels:
           role: broker
 
       - targets:
           - "server1.anand-test.l-free-machine.emulab.net:8083"
           - "server2.anand-test.l-free-machine.emulab.net:8083"
-          - "server3.anand-test.l-free-machine.emulab.net:8083"
-          - "server4.anand-test.l-free-machine.emulab.net:8083"
-          - "server5.anand-test.l-free-machine.emulab.net:8083"
         labels:
           role: server

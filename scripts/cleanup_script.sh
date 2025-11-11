@@ -6,13 +6,14 @@ rm directory
 rm server
 
 source ./env-vars.sh
+REMOTE_HOME="/users/${cloudLabUserName}"
 
 for ((i=1; i<=numBroker; i++)); do
-    broker_url="at6404@broker${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
+    broker_url="${cloudLabUserName}@broker${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
     echo "Cleaning up broker${i} at ${broker_url}"
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${broker_url} << EOF
         # Commands to execute on the broker
-        cd /users/at6404
+        cd ${REMOTE_HOME}
         rm -rf logs
         sudo pkill -f broker
         sudo pkill -f promtail
@@ -27,11 +28,11 @@ EOF
 done
 
 for ((i=1; i<=numServer; i++)); do
-    server_url="at6404@server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
+    server_url="${cloudLabUserName}@server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
     echo "Cleaning up server${i} at ${server_url}"
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${server_url} << EOF
         # Commands to execute on the broker
-        cd /users/at6404
+        cd ${REMOTE_HOME}
         sudo pkill -f server
         sudo pkill -f storage_reader
         rm -f server output.log *.json *.yml
@@ -48,10 +49,10 @@ EOF
     fi
 done
 
-directory_url="at6404@directory.${experimentName}.${projectName}.${clusterType}.${suffix}"
+directory_url="${cloudLabUserName}@directory.${experimentName}.${projectName}.${clusterType}.${suffix}"
 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${directory_url} << EOF
         # Commands to execute on the broker
-        cd /users/at6404
+        cd ${REMOTE_HOME}
         sudo pkill -f directory
         rm -rf logs
         sudo pkill -f promtail

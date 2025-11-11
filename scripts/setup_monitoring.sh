@@ -4,13 +4,14 @@
 ###############
 
 source ./env-vars.sh
+REMOTE_HOME="/users/${cloudLabUserName}"
 
 # Loop over brokers and send multi-line SSH commands
 for ((i=1; i<=numBroker; i++)); do
-    broker_url="at6404@broker${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
+    broker_url="${cloudLabUserName}@broker${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${broker_url} << EOF
         # Commands to execute on the broker
-        cd /users/at6404
+        cd ${REMOTE_HOME}
         wget https://github.com/grafana/loki/releases/latest/download/promtail-linux-amd64.zip
         unzip promtail-linux-amd64.zip
         chmod +x promtail-linux-amd64
@@ -21,10 +22,10 @@ EOF
 done
 
 for ((i=1; i<=numServer; i++)); do
-    server_url="at6404@server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
+    server_url="${cloudLabUserName}@server${i}.${experimentName}.${projectName}.${clusterType}.${suffix}"
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${server_url} << EOF
         # Commands to execute on the broker
-        cd /users/at6404
+        cd ${REMOTE_HOME}
         wget https://github.com/grafana/loki/releases/latest/download/promtail-linux-amd64.zip
         unzip promtail-linux-amd64.zip
         chmod +x promtail-linux-amd64
@@ -33,6 +34,34 @@ for ((i=1; i<=numServer; i++)); do
         exit
 EOF
 done
+
+
+###############
+# Generate promtail-config.yml locally
+###############
+cat > configs/promtail-config.yml <<EOF
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://monitoring.${experimentName}.${projectName}.${clusterType}.${suffix}:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: l-free-machine
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: l-free-machine
+          app: l-free-machine
+          __path__: ./logs/*.log
+EOF
+
+echo "Generated promtail-config.yml"
 
 ###############
 # Generate prometheus.yml locally
@@ -82,10 +111,10 @@ echo "Generated prometheus.yml"
 
 
 PROM_VER="3.5.0"
-server_url="at6404@monitoring.${experimentName}.${projectName}.${clusterType}.${suffix}"
+server_url="${cloudLabUserName}@monitoring.${experimentName}.${projectName}.${clusterType}.${suffix}"
 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${server_url} << EOF
  # Commands to execute on the broker
-cd /users/at6404
+cd ${REMOTE_HOME}
 curl -O -L "https://github.com/grafana/loki/releases/latest/download/loki-linux-amd64.zip"
 unzip loki-linux-amd64.zip
 chmod +x loki-linux-amd64

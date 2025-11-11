@@ -1,7 +1,7 @@
 #!/bin/bash
-
-numServer=5
-numBroker=5
+cloudLabUserName="at6404"
+numServer=2
+numBroker=2
 experimentName="anand-test"
 clusterType="emulab"
 projectName="l-free-machine"
