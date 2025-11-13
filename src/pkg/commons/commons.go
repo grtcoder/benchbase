@@ -2,8 +2,10 @@ package commons
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -11,10 +13,33 @@ import (
 	"go.uber.org/zap"
 )
 
-const (
-	BROADCAST_TIMEOUT = 5 * time.Millisecond
+// const (
+// 	BROADCAST_TIMEOUT         = 15 * time.Millisecond
+// 	BROADCAST_OVERALL_TIMEOUT = 30 * time.Millisecond
+// 	EPOCH_PERIOD              = 200 * time.Millisecond
 
-	EPOCH_PERIOD = 100 * time.Millisecond
+// 	// We wait for 60% of the time for transactions. The rest of the transactions will be in the next package.
+// 	WAIT_FOR_BROKER_PACKAGE = (50 * EPOCH_PERIOD) / 100
+// 	BROKER_REQUEST_TIMEOUT  = 10 * time.Millisecond
+// 	SERVER_REQUEST_TIMEOUT  = 10 * time.Millisecond
+// 	BROKER_RETRY            = 5
+// 	SERVER_RETRY            = 3
+
+// 	SERVER_PER_ATTEMPT_TIMEOUT = 30 * time.Millisecond // read/response + connect per attempt
+// 	SERVER_OVERALL_TIMEOUT     = 70 * time.Millisecond // hard upper bound for a call with retries
+// 	SERVER_RETRY_ATTEMPTS      = 2                     // initial + 1 retry
+// 	SERVER_RETRY_MAX_DELAY     = 10 * time.Millisecond // cap jittered backoff
+
+// 	BROKER_PER_ATTEMPT_TIMEOUT = 60 * time.Millisecond  // read/response + connect per attempt
+// 	BROKER_OVERALL_TIMEOUT     = 100 * time.Millisecond // hard upper bound for a call with retries
+// 	BROKER_RETRY_ATTEMPTS      = 2                      // initial + 1 retry
+// 	BROKER_RETRY_MAX_DELAY     = 10 * time.Millisecond  // cap jittered backoff
+// )
+
+const (
+	BROADCAST_TIMEOUT         = 15 * time.Millisecond
+	BROADCAST_OVERALL_TIMEOUT = 30 * time.Millisecond
+	EPOCH_PERIOD              = 100 * time.Millisecond
 
 	// We wait for 60% of the time for transactions. The rest of the transactions will be in the next package.
 	WAIT_FOR_BROKER_PACKAGE = (50 * EPOCH_PERIOD) / 100
@@ -22,6 +47,16 @@ const (
 	SERVER_REQUEST_TIMEOUT  = 5 * time.Millisecond
 	BROKER_RETRY            = 5
 	SERVER_RETRY            = 3
+
+	SERVER_PER_ATTEMPT_TIMEOUT = 15 * time.Millisecond // read/response + connect per attempt
+	SERVER_OVERALL_TIMEOUT     = 50 * time.Millisecond // hard upper bound for a call with retries
+	SERVER_RETRY_ATTEMPTS      = 2                     // initial + 1 retry
+	SERVER_RETRY_MAX_DELAY     = 5 * time.Millisecond  // cap jittered backoff
+
+	BROKER_PER_ATTEMPT_TIMEOUT = 30 * time.Millisecond // read/response + connect per attempt
+	BROKER_OVERALL_TIMEOUT     = 50 * time.Millisecond // hard upper bound for a call with retries
+	BROKER_RETRY_ATTEMPTS      = 2                     // initial + 1 retry
+	BROKER_RETRY_MAX_DELAY     = 5 * time.Millisecond  // cap jittered backoff
 )
 
 type NodeInfo struct {
@@ -132,6 +167,8 @@ func (m *DirectoryMap) Set(key int, value *NodeInfo) {
 
 func HandleUpdateDirectory(logger *zap.Logger, directoryInfo *NodesMap) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+
 		// Read data from request
 		nodeType := r.Header.Get("X-NodeType")
 		nodeID := r.Header.Get("X-NodeID")
@@ -141,32 +178,36 @@ func HandleUpdateDirectory(logger *zap.Logger, directoryInfo *NodesMap) func(w h
 		}
 		logger.Info("Received update directory request", zap.String("nodeType", nodeType), zap.String("nodeID", nodeID))
 		w.WriteHeader(http.StatusOK)
-		// body, err := io.ReadAll(r.Body)
-		// if err != nil {
-		// 	http.Error(w, "Error reading request body", http.StatusBadRequest)
-		// 	return
+		// if f, ok := w.(http.Flusher); ok {
+		// 	f.Flush()
 		// }
-		// defer r.Body.Close()
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			//http.Error(w, "Error reading request body", http.StatusBadRequest)
+			return
+		}
+		//defer r.Body.Close()
 
 		// Process the data
 		newDirectoryMap := NodesMap{}
-		// if err := json.Unmarshal(body, &newDirectoryMap); err != nil {
-		// 	logger.Error("Error unmarshalling JSON", zap.Error(err))
-		// 	http.Error(w, "Error unmarshalling JSON", http.StatusBadRequest)
-		// 	return
-		// }
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&newDirectoryMap); err != nil {
-			logger.Warn("update decode failed",
-				zap.String("nodeType", nodeType), zap.String("nodeID", nodeID), zap.Error(err))
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		if err := json.Unmarshal(body, &newDirectoryMap); err != nil {
+			logger.Error("Error unmarshalling JSON", zap.Error(err))
+			//http.Error(w, "Error unmarshalling JSON", http.StatusBadRequest)
 			return
 		}
+		// dec := json.NewDecoder(r.Body)
+		// dec.DisallowUnknownFields()
+		// if err := dec.Decode(&newDirectoryMap); err != nil {
+		// 	logger.Warn("update decode failed",
+		// 		zap.String("nodeType", nodeType), zap.String("nodeID", nodeID), zap.Error(err))
+		// 	http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		// 	return
+		// }
 
-		// w.WriteHeader(http.StatusOK)
 		ndm := newDirectoryMap
 		go func(m *NodesMap) {
+			//logger.Info("checking and updating map")
 			directoryInfo.CheckAndUpdateMap(m)
 		}(&ndm)
 
@@ -180,8 +221,9 @@ func BroadcastNodesInfo(logger *zap.Logger, currNodeID int, currNodeType int, di
 		logger.Error("Error encoding JSON", zap.Error(err))
 		return fmt.Errorf("error encoding JSON: %v", err)
 	}
-
-	for id, node := range directoryInfo.BrokerMap.Data {
+	brokersmap := directoryInfo.BrokerMap
+	serversmap := directoryInfo.ServerMap
+	for id, node := range brokersmap.Data {
 		if id == currNodeID && currNodeType == BrokerType {
 			continue
 		}
@@ -194,32 +236,42 @@ func BroadcastNodesInfo(logger *zap.Logger, currNodeID int, currNodeType int, di
 
 			client := &http.Client{
 				Transport: sharedTransport,
-				Timeout:   BROADCAST_TIMEOUT,
+				Timeout:   BROADCAST_OVERALL_TIMEOUT,
 			}
 
-			req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, BROKER_UPDATE_DIRECTORY), bytes.NewBuffer(jsonData))
+			ctx, cancel := context.WithTimeout(context.Background(), BROADCAST_TIMEOUT)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, BROKER_UPDATE_DIRECTORY), bytes.NewBuffer(jsonData))
 			if err != nil {
-				panic(err)
+				logger.Warn("Error creating request", zap.Int("id", id), zap.Error(err))
+				return
 			}
+			// req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, BROKER_UPDATE_DIRECTORY), bytes.NewBuffer(jsonData))
+			// if err != nil {
+			// 	panic(err)
+			// }
 
 			// Set headers
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("X-NodeID", fmt.Sprint(currNodeID))
-			req.Header.Set("X-NodeType", GetNodeType(currNodeID))
+			req.Header.Set("X-NodeType", GetNodeType(currNodeType))
 
 			resp, err := client.Do(req)
 			if err != nil {
 				logger.Error("Error sending request to broker", zap.Int("id", id), zap.Error(err))
 				return
 			}
-			defer resp.Body.Close()
+			defer func() {
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}()
 			if resp.StatusCode != http.StatusOK {
 				logger.Error("Unexpected status code", zap.Int("status_code", resp.StatusCode), zap.Int("broker_id", id))
 			}
 		}(id, currNodeID, node)
 	}
 
-	for id, node := range directoryInfo.ServerMap.Data {
+	for id, node := range serversmap.Data {
 		if id == currNodeID && currNodeType == ServerType {
 			continue
 		}
@@ -232,10 +284,12 @@ func BroadcastNodesInfo(logger *zap.Logger, currNodeID int, currNodeType int, di
 
 			client := &http.Client{
 				Transport: sharedTransport,
-				Timeout:   BROADCAST_TIMEOUT,
+				Timeout:   BROADCAST_OVERALL_TIMEOUT,
 			}
 
-			req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, SERVER_UPDATE_DIRECTORY), bytes.NewBuffer(jsonData))
+			ctx, cancel := context.WithTimeout(context.Background(), BROADCAST_TIMEOUT)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, SERVER_UPDATE_DIRECTORY), bytes.NewBuffer(jsonData))
 			if err != nil {
 				// Handle error
 				logger.Warn("Error creating request", zap.Int("id", id), zap.Error(err))
@@ -245,14 +299,17 @@ func BroadcastNodesInfo(logger *zap.Logger, currNodeID int, currNodeType int, di
 			// Set headers
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("X-NodeID", fmt.Sprint(currNodeID))
-			req.Header.Set("X-NodeType", GetNodeType(currNodeID))
+			req.Header.Set("X-NodeType", GetNodeType(currNodeType))
 
 			resp, err := client.Do(req)
 			if err != nil {
 				logger.Warn("Error sending request to server", zap.Int("id", id), zap.Error(err))
 				return
 			}
-			defer resp.Body.Close()
+			defer func() {
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}()
 			if resp.StatusCode != http.StatusOK {
 				logger.Warn("Unexpected status code", zap.Int("status_code", resp.StatusCode), zap.Int("server_id", id))
 			}
@@ -261,6 +318,6 @@ func BroadcastNodesInfo(logger *zap.Logger, currNodeID int, currNodeType int, di
 
 	wg.Wait()
 
-	logger.Info("Broadcasting nodes info complete", zap.Int("currNodeID", currNodeID), zap.Int("currNodeType", currNodeType))
+	logger.Warn("Broadcasting nodes info complete", zap.Int("currNodeID", currNodeID), zap.Int("currNodeType", currNodeType))
 	return nil
 }

@@ -3,16 +3,20 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"lockfreemachine/src/pkg/commons"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -162,11 +166,20 @@ func (s *Server) MetricsMiddleware(next http.Handler) http.Handler {
 }
 
 var sharedTr = &http.Transport{
-	MaxIdleConns:          512,
-	MaxIdleConnsPerHost:   128,
-	IdleConnTimeout:       90 * time.Second,
-	ResponseHeaderTimeout: 5 * time.Second,
-	ExpectContinueTimeout: 1 * time.Second,
+	MaxIdleConns:        512,
+	MaxIdleConnsPerHost: 128,
+	IdleConnTimeout:     90 * time.Second,
+	MaxConnsPerHost:     256,
+	ForceAttemptHTTP2:   true,
+	// Keep per-hop timeouts tight; the per-attempt context is the main guard.
+	DialContext: (&net.Dialer{
+		Timeout:   commons.SERVER_PER_ATTEMPT_TIMEOUT, // connect must fit per attempt
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+
+	TLSHandshakeTimeout:   commons.SERVER_PER_ATTEMPT_TIMEOUT,
+	ResponseHeaderTimeout: commons.SERVER_PER_ATTEMPT_TIMEOUT, // time to first byte
+	ExpectContinueTimeout: 50 * time.Millisecond,
 }
 
 func makeInstrumentedClient(targetID string) *http.Client {
@@ -183,28 +196,25 @@ func makeInstrumentedClient(targetID string) *http.Client {
 
 	return &http.Client{
 		Transport: instrumentedTransport,
-		Timeout:   commons.SERVER_REQUEST_TIMEOUT,
+		Timeout:   commons.SERVER_OVERALL_TIMEOUT,
 	}
 }
 
-// writeToFile is a goroutine that writes packages to files.
-func (s *Server) writeToFile() {
+func (s *Server) startWriters() {
 	err := os.MkdirAll(fmt.Sprintf("./packages_%d", s.serverID), os.ModePerm)
 	if err != nil {
 		logger.Error("Failed to create folder", zap.Error(err))
 		return
 	}
-	for data := range s.writeChan {
-		// Read from the write channel and write the package to a file.
-		err := s.writePackage(data)
-		if err != nil {
-			logger.Error("Failed to write package to file", zap.Error(err))
-			logger.Info("oi panic panic writefile")
-			continue
-		}
+	for i := 0; i < 4; i++ {
+		go func(id int) {
+			for pkg := range s.writeChan {
+				if err := s.writePackage(pkg); err != nil {
+					logger.Error("write failed", zap.Int("writer", id), zap.Error(err))
+				}
+			}
+		}(i)
 	}
-
-	logger.Info("Write channel closed, stopping file writing.")
 }
 
 // findSetDifference finds the set difference between two lists of integers.
@@ -227,32 +237,39 @@ func findSetDifference(list1, list2 []int) []int {
 
 // Server struct represents the server instance.
 type Server struct {
-	ip                string // IP address of the server
-	port              int    // Port number of the server
-	readerPort        int    //port number of the reader service, the ip remains the same.
-	directoryAddr     string
-	packageCounter    int                        // Address of the directory service
-	DirectoryInfo     *commons.NodesMap          // Directory information
-	serverID          int                        // Server ID
-	writeChan         chan *commons.Package      // Channel to write packages to files
-	answer            map[int]*commons.StateList // Map of broker IDs to their states
-	packageArray      *queue.RingBuffer          // Array to hold packages
-	dropRate          float64                    // api requests
+	ip             string // IP address of the server
+	port           int    // Port number of the server
+	readerPort     int    //port number of the reader service, the ip remains the same.
+	directoryAddr  string
+	packageCounter int                   // Address of the directory service
+	DirectoryInfo  *commons.NodesMap     // Directory information
+	serverID       int                   // Server ID
+	writeChan      chan *commons.Package // Channel to write packages to files
+	//answer            map[int]*commons.StateList // Map of broker IDs to their states
+	packageArray      *queue.RingBuffer // Array to hold packages
+	dropRate          float64           // api requests
 	packageCountStart int
 	startTimestamp    time.Time
-	mu                sync.RWMutex
+	//mu                sync.RWMutex
+	canReceive bool
+	answer0    map[int]*commons.StateList
+	answer1    map[int]*commons.StateList
+	active     atomic.Pointer[map[int]*commons.StateList]
 }
 
 // requestPackage sends a request to the server to get a package.
 func (s *Server) requestPackage(serverURL string, brokerID int, pkg *commons.Package) func() error {
 	return func() error {
 		client := makeInstrumentedClient("request-package")
-
+		ctx, cancel := context.WithTimeout(context.Background(), commons.SERVER_PER_ATTEMPT_TIMEOUT)
+		defer cancel()
 		// Create a new HTTP request to request package
-		req, err := http.NewRequest("GET", fmt.Sprintf("%s?brokerID=%d", serverURL, brokerID), nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s?brokerID=%d", serverURL, brokerID), nil)
 		if err != nil {
-			logger.Info("oi panic panic requestPackage")
-			panic(err)
+			// logger.Error("oi panic panic requestPackage")
+			// panic(err)
+			logger.Error("Error creating request to get package", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Error(err))
+			return fmt.Errorf("error creating request to get package: %s", err)
 		}
 
 		// Set headers for the request
@@ -283,9 +300,16 @@ func (s *Server) requestPackage(serverURL string, brokerID int, pkg *commons.Pac
 			}
 
 			// Process the package
-			logger.Info("Received package from server", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Any("package", pkg))
+			logger.Warn("Received package from server", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Any("packageID", pkg.PackageID))
 			return nil
+		}
+
+		if resp.StatusCode == http.StatusNotFound {
+			defer io.Copy(io.Discard, resp.Body)
+			logger.Error("Package not found", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Int("statusCode", resp.StatusCode))
+			return fmt.Errorf("notfound: package not found at %s", serverURL)
 		} else {
+			defer io.Copy(io.Discard, resp.Body)
 			logger.Error("Unexpected status code", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Int("statusCode", resp.StatusCode))
 			return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 		}
@@ -296,11 +320,13 @@ func (s *Server) requestPackageFromStorage(serverURL string, brokerID int, packa
 	return func() error {
 		client := makeInstrumentedClient("request-package-storage")
 
+		ctx, cancel := context.WithTimeout(context.Background(), commons.SERVER_PER_ATTEMPT_TIMEOUT)
+		defer cancel()
 		// Create a new HTTP request to request package
-		req, err := http.NewRequest("GET", fmt.Sprintf("%s?brokerID=%d&packageID=%d", serverURL, brokerID, packageID), nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s?brokerID=%d&packageID=%d", serverURL, brokerID, packageID), nil)
 		if err != nil {
-			logger.Info("oi panic panic requestpackage from storage")
-			panic(err)
+			logger.Error("oi panic panic requestpackage from storage")
+			return fmt.Errorf("error creating request to get package from storage: %s", err)
 		}
 
 		// Set headers for the request
@@ -331,7 +357,7 @@ func (s *Server) requestPackageFromStorage(serverURL string, brokerID int, packa
 			}
 
 			// Process the package
-			logger.Info("Received package from storage server", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Int("packageID", packageID), zap.Any("package", pkg))
+			logger.Warn("Received package from storage server", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Int("packageID", packageID))
 			return nil
 		} else {
 			logger.Error("Unexpected status code", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Int("packageID", packageID), zap.Int("statusCode", resp.StatusCode))
@@ -344,10 +370,13 @@ func (s *Server) sendPackage(serverURL string, jsonData []byte) func() error {
 	return func() error {
 		client := makeInstrumentedClient("server-send-package")
 
-		req, err := http.NewRequest("POST", serverURL, bytes.NewBuffer(jsonData))
+		ctx, cancel := context.WithTimeout(context.Background(), commons.SERVER_PER_ATTEMPT_TIMEOUT)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, "POST", serverURL, bytes.NewBuffer(jsonData))
 		if err != nil {
-			logger.Info("oi panic panic sendPackage")
-			panic(err)
+			logger.Error("oi panic panic sendPackage")
+			return fmt.Errorf("error creating request to send package: %s", err)
 		}
 
 		// Set headers
@@ -366,7 +395,7 @@ func (s *Server) sendPackage(serverURL string, jsonData []byte) func() error {
 		}
 		bodyString := string(body)
 
-		if resp.StatusCode != http.StatusOK {
+		if (resp.StatusCode != http.StatusOK) && (resp.StatusCode != http.StatusAccepted) {
 			return fmt.Errorf("unexpected status code: %d for server %s: error: %s", resp.StatusCode, serverURL, bodyString)
 		}
 		return nil
@@ -377,11 +406,19 @@ func (s *Server) requestPackageWithRetry(serverURL string, brokerID int) (*commo
 	pkg := &commons.Package{}
 	err := retry.Do(
 		s.requestPackage(serverURL, brokerID, pkg),
-		retry.Attempts(commons.SERVER_RETRY), // Number of retry attempts
-		retry.Delay(0),                       // No delay
-		retry.DelayType(retry.FixedDelay),    // Use fixed delay strategy
+		retry.Attempts(commons.SERVER_RETRY_ATTEMPTS),  // Number of retry attempts
+		retry.Delay(2*time.Millisecond),                // 2ms delay
+		retry.DelayType(retry.RandomDelay),             // Use random delay strategy
+		retry.MaxDelay(commons.SERVER_RETRY_MAX_DELAY), // cap at 5ms
 		retry.OnRetry(func(n uint, err error) {
 			logger.Error("Retrying request to get package", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Int("attempt", int(n)+1), zap.Error(err))
+		}),
+		retry.RetryIf(func(err error) bool {
+			// Do not retry if it's a 404
+			if strings.HasPrefix(err.Error(), "notfound:") {
+				return false
+			}
+			return true
 		}),
 	)
 	return pkg, err
@@ -391,9 +428,10 @@ func (s *Server) requestPackageFromStorageWithRetry(serverURL string, brokerID i
 	pkg := &commons.Package{}
 	err := retry.Do(
 		s.requestPackageFromStorage(serverURL, brokerID, packageID, pkg),
-		retry.Attempts(commons.SERVER_RETRY), // Number of retry attempts
-		retry.Delay(0),                       // No delay
-		retry.DelayType(retry.FixedDelay),    // Use fixed delay strategy
+		retry.Attempts(commons.SERVER_RETRY_ATTEMPTS),  // Number of retry attempts
+		retry.Delay(2*time.Millisecond),                // 2ms delay
+		retry.DelayType(retry.RandomDelay),             // Use random delay strategy
+		retry.MaxDelay(commons.SERVER_RETRY_MAX_DELAY), // cap at 5ms
 		retry.OnRetry(func(n uint, err error) {
 			logger.Error("Retrying request to get package", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Int("attempt", int(n)+1), zap.Error(err))
 		}),
@@ -401,37 +439,93 @@ func (s *Server) requestPackageFromStorageWithRetry(serverURL string, brokerID i
 	return pkg, err
 }
 
-func (s *Server) setupAnswerMap() {
+// func (s *Server) setupAnswerMap() {
 
+// 	for k := range s.DirectoryInfo.BrokerMap.Data {
+// 		s.mu.RLock()
+// 		sl := s.answer[k]
+// 		s.mu.RUnlock()
+// 		if sl == nil {
+// 			s.mu.Lock()
+// 			if s.answer[k] == nil { // double-check after acquiring the lock
+// 				s.answer[k] = commons.NewStateList()
+// 			}
+// 			sl = s.answer[k]
+// 			s.mu.Unlock()
+// 		}
+// 		head := sl.GetHead()
+// 		if head == nil || head.GetState() == commons.IgnoreBroker {
+// 			continue
+// 		}
+// 		sl.ReplaceState(&commons.StateValue{State: commons.Undefined, Pkg: nil})
+// 		// newHead := commons.NewStateNode(&commons.StateValue{
+// 		//     State: commons.Undefined,
+// 		// })
+// 		// sl.UpdateState(head, newHead)
+// 	}
+
+// }
+
+func (s *Server) initAnswerBuffers() {
+	s.answer0 = make(map[int]*commons.StateList, len(s.DirectoryInfo.BrokerMap.Data))
+	s.answer1 = make(map[int]*commons.StateList, len(s.DirectoryInfo.BrokerMap.Data))
+
+	// Pre-create keys in both maps so you never change map structure at runtime.
 	for k := range s.DirectoryInfo.BrokerMap.Data {
-		s.mu.RLock()
-		sl := s.answer[k]
-		s.mu.RUnlock()
+		s.answer0[k] = commons.NewStateList()
+		s.answer1[k] = commons.NewStateList()
+	}
+
+	// Pick one as the initial active buffer
+	s.active.Store(&s.answer0)
+}
+
+// Reset/prepare a target buffer (the inactive one)
+func (s *Server) setupAnswerMapOn(target map[int]*commons.StateList) {
+	// Reset states without touching keys (so no map writes)
+	for k := range s.DirectoryInfo.BrokerMap.Data {
+		sl := target[k]
 		if sl == nil {
-			s.mu.Lock()
-			if s.answer[k] == nil { // double-check after acquiring the lock
-				s.answer[k] = commons.NewStateList()
-			}
-			sl = s.answer[k]
-			s.mu.Unlock()
+			// Shouldn't happen if you prefilled both maps, but be defensive.
+			sl = commons.NewStateList()
+			target[k] = sl
 		}
+
 		head := sl.GetHead()
 		if head == nil || head.GetState() == commons.IgnoreBroker {
 			continue
 		}
 		sl.ReplaceState(&commons.StateValue{State: commons.Undefined, Pkg: nil})
-		// newHead := commons.NewStateNode(&commons.StateValue{
-		//     State: commons.Undefined,
-		// })
-		// sl.UpdateState(head, newHead)
+	}
+}
+
+// Flip active buffer on epoch change.
+// If epoch is even use answer0, if odd use answer1 (as you wanted).
+func (s *Server) flipEpoch(epoch uint64) {
+	var next *map[int]*commons.StateList
+	if epoch%2 == 0 {
+		next = &s.answer0
+	} else {
+		next = &s.answer1
 	}
 
+	// Prepare the buffer that will become active.
+	s.setupAnswerMapOn(*next)
+
+	// Atomic publish: readers will immediately see the new map pointer.
+	s.active.Store(next)
+}
+
+func (s *Server) currentAnswer() map[int]*commons.StateList {
+	p := s.active.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 func (s *Server) updateNotReceivedPackage() {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, stateList := range s.answer {
+	for _, stateList := range s.currentAnswer() {
 		if stateList == nil {
 			continue
 		}
@@ -447,9 +541,7 @@ func (s *Server) updateNotReceivedPackage() {
 
 func (s *Server) getBrokerList(state int) []int {
 	var brokerList []int
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for brokerID, stateList := range s.answer {
+	for brokerID, stateList := range s.currentAnswer() {
 		if stateList == nil {
 			continue
 		}
@@ -468,9 +560,7 @@ func (s *Server) getBrokerList(state int) []int {
 
 // getStateList safely fetches the StateList for a broker.
 func (s *Server) getStateList(brokerID int) (*commons.StateList, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	sl, ok := s.answer[brokerID]
+	sl, ok := s.currentAnswer()[brokerID]
 	return sl, ok && sl != nil
 }
 
@@ -484,21 +574,36 @@ func (s *Server) GetState(brokerID int) *commons.StateNode {
 	return currHead
 }
 
+// TODO: Use update state instead of replace state?
+// func (s *Server) setIgnoreInBoth(brokerID int) {
+// 	for _, m := range []map[int]*commons.StateList{s.answer0, s.answer1} {
+// 		if sl := m[brokerID]; sl != nil {
+// 			sl.ReplaceState(&commons.StateValue{State: commons.IgnoreBroker, Pkg: nil})
+// 		}
+// 	}
+// }
+
+func (s *Server) setIgnoreInBoth(brokerID int) {
+	for _, m := range []map[int]*commons.StateList{s.answer0, s.answer1} {
+		if sl := m[brokerID]; sl != nil {
+			//sl.ReplaceState(&commons.StateValue{State: commons.IgnoreBroker, Pkg: nil})
+			sl.UpdateState(sl.GetHead(),
+				commons.NewStateNode(&commons.StateValue{State: commons.IgnoreBroker, Pkg: nil}),
+			)
+		}
+	}
+}
+
 func (s *Server) writePackage(pkg *commons.Package) error {
 	fpath := fmt.Sprintf("./packages_%d/pkg_%d_%d.json", s.serverID, pkg.BrokerID, pkg.PackageID)
 
-	// Check if file already exists
-	if _, err := os.Stat(fpath); err == nil {
-		// File exists -> do nothing
-		logger.Info("File already exists, skipping write", zap.String("filePath", fpath))
-		return nil
-	}
-
-	// Write to file
-	file, err := os.Create(fpath)
+	file, err := os.OpenFile(fpath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 	if err != nil {
-		logger.Error("Failed to create file", zap.String("filePath", fpath), zap.Error(err))
-		return fmt.Errorf("error creating file: %s", err)
+		if errors.Is(err, os.ErrExist) {
+			logger.Info("File exists, skipping", zap.String("filePath", fpath))
+			return nil
+		}
+		return fmt.Errorf("create %s: %w", fpath, err)
 	}
 	defer file.Close()
 
@@ -529,31 +634,42 @@ func (s *Server) handleAddPackage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logger.Info("Received package from broker", zap.Int("brokerID", pkg.BrokerID), zap.Int("packageID", pkg.PackageID))
+	logger.Warn("Received package from broker", zap.Int("brokerID", pkg.BrokerID), zap.Int("packageID", pkg.PackageID))
 
+	if s.packageCounter > pkg.PackageID {
+		logger.Warn("Received package with packageID less than current packageCounter, ignoring", zap.Int("brokerID", pkg.BrokerID), zap.Int("packageID", pkg.PackageID), zap.Int("currentPackageCounter", s.packageCounter))
+		//http.Error(w, "Stale package, ignoring", http.StatusAccepted)
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	currHead := s.GetState(pkg.BrokerID)
 	if currHead == nil {
-		logger.Info("Package is missing")
-		http.Error(w, "Package is missing", http.StatusBadRequest)
-		//http.Error(w, "Package is missing", http.StatusAccepted)
+		//logger.Info("Package is missing")
+		//http.Error(w, "Package is missing", http.StatusBadRequest)
+		http.Error(w, "Package is missing", http.StatusAccepted)
 		return
 	}
 
 	if currHead.GetState() == commons.IgnoreBroker {
 
-		logger.Info("Dropping package since ignoreBroker is set", zap.String("brokerID", fmt.Sprintf("%d", pkg.BrokerID)))
-		http.Error(w, fmt.Sprintf("Dropping package for brokerID: %d, since IgnoreBroker state is set", pkg.BrokerID), http.StatusBadRequest)
+		//logger.Info("Dropping package since ignoreBroker is set", zap.String("brokerID", fmt.Sprintf("%d", pkg.BrokerID)))
+		//http.Error(w, fmt.Sprintf("Dropping package for brokerID: %d, since IgnoreBroker state is set", pkg.BrokerID), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("Dropping package for brokerID: %d, since IgnoreBroker state is set", pkg.BrokerID), http.StatusAccepted)
 		return
 	}
 
 	if currHead.GetState() == commons.Received {
-		logger.Info("Package is already received", zap.String("brokerID", fmt.Sprintf("%d", pkg.BrokerID)), zap.String("state", fmt.Sprintf("%d", currHead.GetState())))
+		logger.Warn("Package is already received", zap.String("brokerID", fmt.Sprintf("%d", pkg.BrokerID)), zap.String("state", fmt.Sprintf("%d", currHead.GetState())))
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
 	if currHead.GetState() == commons.NotReceived {
-		http.Error(w, fmt.Sprintf("broker%d package state is set to NotReceived", pkg.BrokerID), http.StatusBadRequest)
+		logger.Warn("Package state is set to not received", zap.String("brokerID", fmt.Sprintf("%d", pkg.BrokerID)), zap.String("state", fmt.Sprintf("%d", currHead.GetState())))
+		//http.Error(w, fmt.Sprintf("broker%d package state is set to NotReceived", pkg.BrokerID), http.StatusBadRequest)
+		//http.Error(w, "Package state is set to not received", http.StatusAccepted)
+		w.WriteHeader(http.StatusAccepted)
+		return
 	}
 
 	if currHead.GetState() == commons.Undefined {
@@ -579,6 +695,7 @@ func (s *Server) handleAddPackage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRequestPackage(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
 	params := r.URL.Query()
 	brokerID := params.Get("brokerID")
 	logger.Info("Received request for package", zap.String("brokerID", brokerID))
@@ -599,21 +716,22 @@ func (s *Server) handleRequestPackage(w http.ResponseWriter, r *http.Request) {
 		pkg := currHead.GetPackage()
 		if err := json.NewEncoder(w).Encode(pkg); err != nil {
 			logger.Error("error encoding JSON response", zap.Error(err))
-			http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+			//http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		}
 		// Perform necessary operations with packageID and brokerID
 		return
 	}
 
-	logger.Info("Package is not in received state", zap.Int("brokerID", brokerIDInt))
+	logger.Warn("Package is not in received state", zap.Int("brokerID", brokerIDInt))
 	http.Error(w, "Package is not present", http.StatusNotFound)
 }
 
 func (s *Server) handleIgnoreBroker(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
 	params := r.URL.Query()
 	brokerID := params.Get("brokerID")
 
-	logger.Info("Received ignore broker request", zap.String("brokerID", brokerID))
+	logger.Warn("Received ignore broker request", zap.String("brokerID", brokerID))
 
 	brokerIDInt, err := strconv.Atoi(brokerID)
 	if err != nil {
@@ -627,19 +745,21 @@ func (s *Server) handleIgnoreBroker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	currHead := sl.GetHead()
-	if currHead.GetState() == commons.NotReceived {
-		if ok := sl.UpdateState(currHead, commons.NewStateNode(&commons.StateValue{State: commons.IgnoreBroker, Pkg: nil})); !ok {
-			logger.Error("error updating state for brokerID", zap.Int("brokerID", brokerIDInt))
-			http.Error(w, "Error updating state", http.StatusBadRequest)
-			return
-		}
+	if currHead.GetState() == commons.NotReceived || currHead.GetState() == commons.Undefined {
+		// if ok := sl.UpdateState(currHead, commons.NewStateNode(&commons.StateValue{State: commons.IgnoreBroker, Pkg: nil})); !ok {
+		// 	logger.Error("error updating state for brokerID", zap.Int("brokerID", brokerIDInt))
+		// 	http.Error(w, "Error updating state", http.StatusBadRequest)
+		// 	return
+		// }
 		w.WriteHeader(http.StatusOK)
+		go s.setIgnoreInBoth(brokerIDInt)
 		return
 	}
 	http.Error(w, "Couldn't set broker state to ignoreBroker ", http.StatusBadRequest)
 }
 
 func (s *Server) handleBrokerOk(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close() // Close body after reading
 	params := r.URL.Query()
 	brokerID := params.Get("brokerID")
 	brokerIDInt, err := strconv.Atoi(brokerID)
@@ -650,25 +770,25 @@ func (s *Server) handleBrokerOk(w http.ResponseWriter, r *http.Request) {
 	}
 	currHead := s.GetState(brokerIDInt)
 	if currHead == nil {
-		logger.Info("Package is missing")
+		logger.Warn("Handle broker Ok: BrokerID is missing")
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
 	if currHead.GetState() == commons.IgnoreBroker {
-		logger.Info("Dropping package since ignoreBroker is set", zap.String("brokerID", fmt.Sprintf("%d", brokerIDInt)), zap.String("state", fmt.Sprintf("%d", currHead.GetState())))
-		w.WriteHeader(http.StatusNotFound)
+		logger.Warn("Dropping package since ignoreBroker is set", zap.String("brokerID", fmt.Sprintf("%d", brokerIDInt)), zap.String("state", fmt.Sprintf("%d", currHead.GetState())))
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 
 	if currHead.GetState() == commons.Received {
-		logger.Info("Package is already received", zap.String("brokerID", fmt.Sprintf("%d", brokerIDInt)), zap.String("state", fmt.Sprintf("%d", currHead.GetState())))
+		logger.Warn("Package is already received", zap.String("brokerID", fmt.Sprintf("%d", brokerIDInt)), zap.String("state", fmt.Sprintf("%d", currHead.GetState())))
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
 	body, err := io.ReadAll(r.Body)
-	defer r.Body.Close() // Close body after reading
+	// defer r.Body.Close() // Close body after reading
 	if err != nil {
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
@@ -689,7 +809,6 @@ func (s *Server) handleBrokerOk(w http.ResponseWriter, r *http.Request) {
 			head := sl.GetHead()
 			if head != nil && head.GetState() == commons.NotReceived {
 				if sl.UpdateState(sl.GetHead(), commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})) {
-					// if ok := s.answer[brokerID].UpdateState(s.answer[brokerID].GetHead(), commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})); ok {
 					s.packageArray.Put(pkg)
 					s.writeChan <- pkg
 				}
@@ -725,6 +844,7 @@ func (s *Server) registerServer() error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		defer io.Copy(io.Discard, resp.Body)
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
@@ -811,7 +931,6 @@ func (s *Server) requestPackages(endpoint string, brokerList []int) {
 					head := sl.GetHead()
 					if head != nil && head.GetState() == commons.NotReceived {
 						if sl.UpdateState(sl.GetHead(), commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})) {
-							// if ok := s.answer[brokerID].UpdateState(s.answer[brokerID].GetHead(), commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})); ok {
 							s.packageArray.Put(pkg)
 							s.writeChan <- pkg
 						}
@@ -819,7 +938,7 @@ func (s *Server) requestPackages(endpoint string, brokerList []int) {
 
 				}
 
-				logger.Info("Received package from server", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Any("package", pkg))
+				logger.Warn("Received package from server", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Any("package", pkg))
 			}(serverID)
 		}
 	}
@@ -842,13 +961,7 @@ func (s *Server) requestPackagesFromStorage(endpoint string, brokerList []int) {
 			go func(serverID int) {
 				defer wg.Done()
 				serverURL := fmt.Sprintf("http://%s:%d%s", serverMap.Data[serverID].IP, serverMap.Data[serverID].ReaderPort, endpoint)
-				//currHead := s.answer[brokerID].GetHead()
-				// logger.Info("State state state", zap.Any("ans", s.answer))
-				// logger.Info("State state state", zap.Any("currhead", currHead))
 				packageID := s.packageCounter
-				// if currHead != nil {
-				// 	packageID = currHead.GetPackage().PackageID
-				// }
 				pkg, err := s.requestPackageFromStorageWithRetry(serverURL, brokerID, packageID)
 				if err != nil {
 					logger.Error("error while requesting package", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Error(err))
@@ -859,7 +972,6 @@ func (s *Server) requestPackagesFromStorage(endpoint string, brokerList []int) {
 					head := sl.GetHead()
 					if head != nil && head.GetState() == commons.NotReceived {
 						if sl.UpdateState(head, commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})) {
-							// if ok := s.answer[brokerID].UpdateState(s.answer[brokerID].GetHead(), commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})); ok {
 							s.packageArray.Put(pkg)
 							s.writeChan <- pkg
 						}
@@ -867,7 +979,7 @@ func (s *Server) requestPackagesFromStorage(endpoint string, brokerList []int) {
 
 				}
 
-				logger.Info("Received package from server", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Any("package", pkg))
+				logger.Warn("Received package from server storage", zap.String("serverURL", serverURL), zap.Int("brokerID", brokerID), zap.Any("package", pkg))
 			}(serverID)
 		}
 	}
@@ -877,7 +989,9 @@ func (s *Server) requestPackagesFromStorage(endpoint string, brokerList []int) {
 func (s *Server) sendIgnoreBroker(serverURL string) func() error {
 	return func() error {
 		client := makeInstrumentedClient("send-ignore-broker")
-		req, err := http.NewRequest("POST", serverURL, nil)
+		ctx, cancel := context.WithTimeout(context.Background(), commons.SERVER_PER_ATTEMPT_TIMEOUT)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, "POST", serverURL, nil)
 		if err != nil {
 			logger.Info("oi panic panic send ignore broker")
 			panic(err)
@@ -892,7 +1006,10 @@ func (s *Server) sendIgnoreBroker(serverURL string) func() error {
 		if err != nil {
 			return fmt.Errorf("error sending request to server %s: %s", serverURL, err)
 		}
-		defer resp.Body.Close()
+		defer func() {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}()
 		return nil
 	}
 }
@@ -900,13 +1017,10 @@ func (s *Server) sendIgnoreBroker(serverURL string) func() error {
 func (s *Server) sendBrokerOkWithRetry(serverURL string, jsonData []byte, brokerid int) error {
 	return retry.Do(
 		s.sendPackage(serverURL, jsonData),
-		retry.Attempts(commons.SERVER_RETRY),
-		retry.Delay(1*time.Millisecond),
-		retry.DelayType(retry.CombineDelay(
-			retry.BackOffDelay, // exponential backoff
-			retry.RandomDelay,  // add jitter
-		)),
-		retry.MaxDelay(5*time.Millisecond),
+		retry.Attempts(commons.SERVER_RETRY_ATTEMPTS),  // Number of retry attempts
+		retry.Delay(2*time.Millisecond),                // 2ms delay
+		retry.DelayType(retry.RandomDelay),             // Use random delay strategy
+		retry.MaxDelay(commons.SERVER_RETRY_MAX_DELAY), // cap at 5ms
 		retry.OnRetry(func(n uint, err error) {
 			logger.Error("Retrying broker ok request",
 				zap.String("serverURL", serverURL),
@@ -921,9 +1035,10 @@ func (s *Server) sendBrokerOkWithRetry(serverURL string, jsonData []byte, broker
 func (s *Server) sendIgnoreBrokerWithRetry(serverURL string) error {
 	return retry.Do(
 		s.sendIgnoreBroker(serverURL),
-		retry.Attempts(commons.SERVER_RETRY), // Number of retry attempts
-		retry.Delay(0),                       // No delay
-		retry.DelayType(retry.FixedDelay),    // Use fixed delay strategy
+		retry.Attempts(commons.SERVER_RETRY_ATTEMPTS),  // Number of retry attempts
+		retry.Delay(2*time.Millisecond),                // 2ms delay
+		retry.DelayType(retry.RandomDelay),             // Use random delay strategy
+		retry.MaxDelay(commons.SERVER_RETRY_MAX_DELAY), // cap at 5ms
 		retry.OnRetry(func(n uint, err error) {
 			logger.Error("Retrying ignore broker request", zap.String("serverURL", serverURL), zap.Int("attempt", int(n)+1), zap.Error(err))
 		}),
@@ -938,9 +1053,6 @@ func (s *Server) sendBrokerOkRequests(brokerList []int) {
 		if !ok {
 			continue
 		}
-		// s.mu.RLock()
-		// sl := s.answer[brokerID]
-		// s.mu.RUnlock()
 		if sl == nil {
 			continue
 		}
@@ -1009,9 +1121,10 @@ func (s *Server) sendIgnoreBrokerRequests(brokerList []int) {
 func (s *Server) sendCurrentServerIDWithRetry(serverURL string) error {
 	return retry.Do(
 		s.sendServerID(serverURL),
-		retry.Attempts(commons.SERVER_RETRY), // Number of retry attempts
-		retry.Delay(0),                       // No delay
-		retry.DelayType(retry.FixedDelay),    // Use fixed delay strategy
+		retry.Attempts(commons.SERVER_RETRY_ATTEMPTS),  // Number of retry attempts
+		retry.Delay(2*time.Millisecond),                // 2ms delay
+		retry.DelayType(retry.RandomDelay),             // Use random delay strategy
+		retry.MaxDelay(commons.SERVER_RETRY_MAX_DELAY), // cap at 5ms
 		retry.OnRetry(func(n uint, err error) {
 			logger.Error("Retrying broker ok request", zap.String("serverURL", serverURL), zap.Int("attempt", int(n)+1), zap.Error(err))
 		}),
@@ -1022,8 +1135,11 @@ func (s *Server) sendServerID(serverURL string) func() error {
 	return func() error {
 		client := makeInstrumentedClient("send-server-id")
 
+		ctx, cancel := context.WithTimeout(context.Background(), commons.SERVER_PER_ATTEMPT_TIMEOUT)
+		defer cancel()
+
 		// Create a new HTTP request to request package
-		req, err := http.NewRequest("GET", serverURL, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", serverURL, nil)
 		if err != nil {
 			logger.Info("oi panic panic sendServerID")
 			panic(err)
@@ -1039,7 +1155,10 @@ func (s *Server) sendServerID(serverURL string) func() error {
 			logger.Error("Error sending request to send ID", zap.String("serverURL", serverURL), zap.Error(err))
 			return fmt.Errorf("error sending request to send ID: %s", err)
 		}
-		defer resp.Body.Close()
+		defer func() {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}()
 
 		if resp.StatusCode == http.StatusOK {
 			// Process the package
@@ -1075,7 +1194,7 @@ func (s *Server) protocolDaemon(ctx context.Context, nextRun time.Time) {
 	// We want the ticker to have millisecond precision
 	//ticker := time.NewTicker(time.Millisecond)
 	logger.Info("Protocol Daemon started")
-	logger.Info("Next run will happen at: ", zap.Time("nextRun", nextRun))
+	logger.Warn("Next run will happen at: ", zap.Time("nextRun", nextRun))
 
 	for {
 		// Sleep (efficiently) until the next deadline or until we're asked to stop
@@ -1086,18 +1205,20 @@ func (s *Server) protocolDaemon(ctx context.Context, nextRun time.Time) {
 				// time to run
 			case <-ctx.Done():
 				t.Stop()
-				logger.Info("Protocol daemon: context cancelled before next run")
+				logger.Error("Protocol daemon: context cancelled before next run")
 				return
 			}
-		} else {
-			// If we’re late (e.g., long previous work or clock jump), run immediately
 		}
 
 		waitPackage := nextRun.Add(commons.WAIT_FOR_BROKER_PACKAGE)
+		//resetMaps := nextRun.Add(commons.EPOCH_PERIOD - 5*time.Millisecond)
 		nextRun = nextRun.Add(commons.EPOCH_PERIOD)
+		s.canReceive = true
 
 		if s.packageCounter == 0 {
-			s.setupAnswerMap()
+			s.initAnswerBuffers()
+		} else {
+			s.flipEpoch(uint64(s.packageCounter))
 		}
 		s.packageCounter++
 		epochNumber.WithLabelValues().Set(float64(s.packageCounter))
@@ -1108,7 +1229,7 @@ func (s *Server) protocolDaemon(ctx context.Context, nextRun time.Time) {
 			logger.Error("error while broadcasting directory info", zap.Error(err))
 		}
 
-		logger.Info("Step 1: Answer map is setup, waiting for packages...")
+		logger.Warn("Step 1: Answer map is setup, waiting for packages...")
 
 		// Wait for brokers until 'waitPackage' without polling
 		if d := time.Until(waitPackage); d > 0 {
@@ -1124,66 +1245,83 @@ func (s *Server) protocolDaemon(ctx context.Context, nextRun time.Time) {
 			}
 		}
 
-		logger.Info("Waiting time is up, checking for received packages...")
+		logger.Warn("Waiting time is up, checking for received packages...")
 
 		// Update the state of packages that are not received.
 		s.updateNotReceivedPackage()
 
 		firstPendingBrokerList := s.getBrokerList(commons.NotReceived)
-		logger.Info("Missing Packages", zap.Any("list", firstPendingBrokerList))
+		logger.Warn("Missing Packages", zap.Any("list", firstPendingBrokerList))
 
-		logger.Info("Step 2: Requesting packages from other servers...")
+		logger.Warn("Step 2: Requesting packages from other servers...")
 		s.requestPackages(commons.SERVER_REQUEST_PACKAGE, firstPendingBrokerList)
 
 		// Request package from the memory of other servers.
 		// Get the list of brokers for which we have still not received the package.
 		pendingBrokerList := s.getBrokerList(commons.NotReceived)
-		logger.Info("Missing Packages", zap.Any("list", pendingBrokerList))
+		logger.Warn("Missing Packages", zap.Any("list", pendingBrokerList))
 
-		logger.Info("Step 3: Requesting packages from storage of other servers...")
+		logger.Warn("Step 3: Requesting packages from storage of other servers...")
 		s.requestPackagesFromStorage(commons.SERVER_READ_STORAGE, pendingBrokerList)
 
-		logger.Info("Step 4 : Sending broker ok request to other with servers ( with packages )")
+		logger.Warn("Step 4 : Sending broker ok request to other with servers ( with packages )")
 		pendingBrokerList = s.getBrokerList(commons.NotReceived)
 		completedBrokerList := s.getBrokerList(commons.Received)
 		logger.Info("Missing Packages", zap.Any("list", pendingBrokerList))
 		// below 2 lines are where the problem's at
 		brokerPackagesFromServer := findSetDifference(firstPendingBrokerList, pendingBrokerList)
-		logger.Info("brokerOk list", zap.Any("list", brokerPackagesFromServer))
+		logger.Warn("brokerOk list", zap.Any("list", brokerPackagesFromServer))
 		s.sendBrokerOkRequests(brokerPackagesFromServer)
 
 		// TODO : check this
 		pendingBrokerList = s.getBrokerList(commons.NotReceived)
-		logger.Info("Complete Packages", zap.Any("list", completedBrokerList))
+		logger.Warn("Complete Packages", zap.Any("list", completedBrokerList))
 		for _, brokerID := range pendingBrokerList {
 			if sl, ok := s.getStateList(brokerID); ok {
 				head := sl.GetHead()
 				if head != nil && head.GetState() == commons.NotReceived {
-					//if s.answer[brokerID].GetHead().GetState() == commons.NotReceived {
 					// We want to ignore the broker if the package is not received.
-					if ok := sl.UpdateState(head, commons.NewStateNode(&commons.StateValue{State: commons.IgnoreBroker, Pkg: nil})); ok {
-						logger.Info("Ignoring broker", zap.Int("brokerID", brokerID))
-					}
+					// if ok := sl.UpdateState(head, commons.NewStateNode(&commons.StateValue{State: commons.IgnoreBroker, Pkg: nil})); ok {
+					// 	logger.Info("Ignoring broker", zap.Int("brokerID", brokerID))
+					// }
+					s.setIgnoreInBoth(brokerID)
+					logger.Info("Ignoring broker", zap.Int("brokerID", brokerID))
 				}
 			}
 		}
 
 		// Send ignore broker requests to other servers.
-		logger.Info("Sending ignore broker requests to other servers for brokers", zap.Any("brokers", pendingBrokerList))
+		logger.Warn("Sending ignore broker requests to other servers for brokers", zap.Any("brokers", pendingBrokerList))
 		s.sendIgnoreBrokerRequests(pendingBrokerList)
+
 		promTimer.ObserveDuration()
 		duration := time.Since(start).Seconds()
 		epochDuration1.WithLabelValues(strconv.Itoa(s.packageCounter)).Set(duration)
 		epochDuration.Set(duration)
+		// if d := time.Until(resetMaps); d > 0 {
+		// 	t := time.NewTimer(d)
+		// 	select {
+		// 	case <-t.C:
+		// 		// time to set up for next epoch (exactly ~5ms before end)
+		// 	case <-ctx.Done():
+		// 		t.Stop()
+		// 		logger.Info("Protocol daemon: context cancelled before setupAnswerMap barrier")
+		// 		promTimer.ObserveDuration()
+		// 		return
+		// 	}
+		// } // if we're already past scheduleAt, fall through and run immediately
+
+		// Do the switchover for the next epoch here
+		//logger.Warn("setting up answer map for next epoch")
+		s.canReceive = false // if you want to close reception 5ms early
+		//s.setupAnswerMap()   // set up the answer map for the next epoch
 		curLen := s.packageArray.Len()
 		logger.Info("Protocol Completed")
-		logger.Info("Cur package array length: ", zap.Uint64("curLen", curLen))
-		logger.Info("Time time time: ", zap.Float64("duration", duration))
-		logger.Info("setting up answer map for next epoch")
-		s.setupAnswerMap()
-		logger.Info("Next run will happen at: ", zap.Time("nextRun", nextRun))
+		logger.Warn("Cur package array length: ", zap.Uint64("curLen", curLen))
+		logger.Warn("Time time time: ", zap.Float64("duration", duration))
+		logger.Warn("Next run will happen at: ", zap.Time("nextRun", nextRun))
 		if s.packageCounter == 500 {
-			logger.Info("5000 epochs done, ending experiment")
+			logger.Warn("5000 epochs done, ending experiment")
 			return
 		}
 	}
@@ -1265,7 +1403,7 @@ func main() {
 	core := zapcore.NewCore(
 		zapcore.NewJSONEncoder(encoderConfig),
 		writeSyncer,
-		zapcore.InfoLevel,
+		zapcore.WarnLevel,
 	)
 
 	logger = zap.New(core)
@@ -1280,10 +1418,12 @@ func main() {
 		directoryAddr:  fmt.Sprintf("http://%s:%d", directoryIP, directoryPort),
 		packageCounter: 0,
 		DirectoryInfo:  &commons.NodesMap{},
-		answer:         make(map[int]*commons.StateList),
+		answer0:        make(map[int]*commons.StateList),
+		answer1:        make(map[int]*commons.StateList),
 		packageArray:   queue.NewRingBuffer(BUFFER_SIZE),
 		writeChan:      make(chan *commons.Package, WRITE_BUFFER_SIZE),
 		dropRate:       dropRate,
+		canReceive:     true,
 	}
 
 	httpServer, err := server.setupServer()
@@ -1292,7 +1432,8 @@ func main() {
 	}
 
 	// Start the writer goroutine. It will end when the channel is closed.
-	go server.writeToFile()
+	//go server.writeToFile()
+	go server.startWriters()
 
 	// Graceful shutdown handling
 	go func() {
@@ -1301,7 +1442,7 @@ func main() {
 		}
 	}()
 
-	logger.Info("Server running on http://localhost:%d", zap.Int("port", server.port))
+	logger.Warn("Server running on http://localhost:%d", zap.Int("port", server.port))
 	// start new service
 	// send ID to our reader service
 	server.sendCurrentServerID()
@@ -1325,13 +1466,13 @@ func main() {
 	<-ctx.Done()
 
 	// Graceful shutdown
-	logger.Info("Shutting down server...")
+	logger.Warn("Shutting down server...")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.Error("HTTP shutdown error", zap.Error(err))
 	}
 	close(server.writeChan)
-	logger.Info("Server stopped.")
+	logger.Warn("Server stopped.")
 
 }

@@ -133,11 +133,18 @@ func (b *Broker) MetricsMiddleware(next http.Handler) http.Handler {
 }
 
 var sharedTr = &http.Transport{
-	MaxIdleConns:          512,
-	MaxIdleConnsPerHost:   128,
-	IdleConnTimeout:       90 * time.Second,
-	ResponseHeaderTimeout: 5 * time.Second,
-	ExpectContinueTimeout: 1 * time.Second,
+	MaxIdleConns:        512,
+	MaxIdleConnsPerHost: 128,
+	IdleConnTimeout:     90 * time.Second,
+	MaxConnsPerHost:     256,
+	ForceAttemptHTTP2:   true,
+	DialContext: (&net.Dialer{
+		Timeout:   commons.BROKER_PER_ATTEMPT_TIMEOUT, // TCP connect cap
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	TLSHandshakeTimeout:   commons.BROKER_PER_ATTEMPT_TIMEOUT,
+	ResponseHeaderTimeout: commons.BROKER_PER_ATTEMPT_TIMEOUT,
+	ExpectContinueTimeout: 50 * time.Millisecond,
 }
 
 func makeInstrumentedClient(targetID string) *http.Client {
@@ -154,7 +161,7 @@ func makeInstrumentedClient(targetID string) *http.Client {
 
 	return &http.Client{
 		Transport: instrumentedTransport,
-		Timeout:   commons.BROKER_REQUEST_TIMEOUT,
+		Timeout:   commons.BROKER_OVERALL_TIMEOUT,
 	}
 }
 
@@ -215,14 +222,30 @@ func (b *Broker) delete_server(ServerID int) error {
 		return fmt.Errorf("error encoding JSON: %v", err)
 	}
 
-	resp, err := http.Post(fmt.Sprintf("%s%s", b.DirectoryAddr, commons.DIRECTORY_REMOVE_SERVER), "application/json", bytes.NewBuffer(jsonData))
+	ctx, cancel := context.WithTimeout(context.Background(), commons.BROKER_PER_ATTEMPT_TIMEOUT)
+	defer cancel()
+
+	client := makeInstrumentedClient("delete-server")
+
+	req, err := http.NewRequestWithContext(ctx,
+		"POST",
+		fmt.Sprintf("%s%s", b.DirectoryAddr, commons.DIRECTORY_REMOVE_SERVER),
+		bytes.NewBuffer(jsonData),
+	)
+	if err != nil {
+		return fmt.Errorf("build req: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
 	if err != nil {
 		logger.Error("Error sending request to directory", zap.Error(err))
 		return fmt.Errorf("error sending request to directory: %v, could not delete server entry", err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
+		defer io.Copy(io.Discard, resp.Body)
 		logger.Error("Unexpected status code from directory", zap.Int("statusCode", resp.StatusCode))
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
@@ -270,6 +293,7 @@ func (b *Broker) register() error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		defer io.Copy(io.Discard, resp.Body)
 		logger.Error("Unexpected status code from directory", zap.Int("statusCode", resp.StatusCode))
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
@@ -343,20 +367,20 @@ func isConnRefused(err error) bool {
 		if errno, ok := sysErr.Err.(syscall.Errno); ok && errno == syscall.ECONNREFUSED {
 			return true
 		}
-		logger.Info("connref1", zap.Error(err))
+		logger.Error("connref1", zap.Error(err))
 		// If not, fall back to the unwrapped Err
 		err = sysErr.Err
 	}
 
 	// 4) Direct Errno check
 	if errors.Is(err, syscall.ECONNREFUSED) {
-		logger.Info("connref2", zap.Error(err))
+		logger.Error("connref2", zap.Error(err))
 		return true
 	}
 
 	// 5) Last‑ditch: substring match on the error string
 	if strings.Contains(err.Error(), "connection refused") {
-		logger.Info("connref3", zap.Error(err))
+		logger.Error("connref3", zap.Error(err))
 		return true
 	}
 
@@ -367,7 +391,9 @@ func (b *Broker) sendPackage(serverURL string, jsonData []byte) func() error {
 	return func() error {
 		client := makeInstrumentedClient("send-package")
 
-		req, err := http.NewRequest("POST", serverURL, bytes.NewBuffer(jsonData))
+		ctx, cancel := context.WithTimeout(context.Background(), commons.BROKER_PER_ATTEMPT_TIMEOUT)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, "POST", serverURL, bytes.NewBuffer(jsonData))
 		if err != nil {
 			panic(err)
 		}
@@ -376,19 +402,21 @@ func (b *Broker) sendPackage(serverURL string, jsonData []byte) func() error {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-NodeID", fmt.Sprint(b.ID))
 		req.Header.Set("X-NodeType", commons.GetNodeType(commons.BrokerType))
-
+		if len(jsonData) > 64*1024 { // only for payloads >64 KB
+			req.Header.Set("Expect", "100-continue")
+		}
 		resp, err := client.Do(req)
-
 		if err != nil {
 			return fmt.Errorf("error sending request to %s: %s", serverURL, err)
 		}
+		defer resp.Body.Close()
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return fmt.Errorf("error reading response body: %v", err)
 		}
 		bodyString := string(body)
-
-		if resp.StatusCode != http.StatusOK {
+		//_, _ = io.Copy(io.Discard, resp.Body) // read until EOF, throw away data
+		if (resp.StatusCode != http.StatusOK) && (resp.StatusCode != http.StatusAccepted) {
 			return fmt.Errorf("unexpected status code: %d for server %s: error: %s", resp.StatusCode, serverURL, bodyString)
 		}
 		return nil
@@ -397,11 +425,11 @@ func (b *Broker) sendPackage(serverURL string, jsonData []byte) func() error {
 
 func (b *Broker) protocolDaemon(ctx context.Context, nextRun time.Time) {
 	packageCounter := b.packageCountStart
-	logger.Info("Starting protocol daemon...")
+	logger.Warn("Starting protocol daemon...")
 
 	// We want the ticker to have millisecond precision
 	//ticker := time.NewTicker(time.Millisecond)
-	logger.Info("Next run will happen at", zap.Time("nextRun", nextRun))
+	logger.Warn("Next run will happen at", zap.Time("nextRun", nextRun))
 
 	for {
 		// Sleep until the next deadline or until we're asked to stop
@@ -412,7 +440,7 @@ func (b *Broker) protocolDaemon(ctx context.Context, nextRun time.Time) {
 				// time to run
 			case <-ctx.Done():
 				t.Stop()
-				logger.Info("Protocol daemon: context cancelled before next run")
+				logger.Error("Protocol daemon: context cancelled before next run")
 				return
 			}
 		} else {
@@ -430,7 +458,7 @@ func (b *Broker) protocolDaemon(ctx context.Context, nextRun time.Time) {
 			pkg = b.DummyPackage(packageCounter, 10, 10)
 		}
 
-		logger.Info("Creating package", zap.Int("packageID", pkg.PackageID), zap.Int("transactionsCount", len(pkg.Transactions)))
+		logger.Warn("Creating package", zap.Int("packageID", pkg.PackageID), zap.Int("transactionsCount", len(pkg.Transactions)))
 
 		jsonData, err := json.Marshal(pkg)
 		if err != nil {
@@ -453,22 +481,19 @@ func (b *Broker) protocolDaemon(ctx context.Context, nextRun time.Time) {
 					return
 				}
 
-				logger.Info("Sending package to server", zap.Int("serverID", serverID), zap.String("ip", node.IP), zap.Int64("port", node.Port))
+				logger.Warn("Sending package to server", zap.Int("serverID", serverID), zap.String("ip", node.IP), zap.Int64("port", node.Port))
 				url := fmt.Sprintf("http://%s:%d%s", node.IP, node.Port, commons.SERVER_ADD_PACKAGE)
 				err := retry.Do(
 					b.sendPackage(url, jsonData),
-					retry.Attempts(commons.BROKER_RETRY), // Number of retry attempts
-					retry.Delay(1*time.Millisecond),      // No delay
-					retry.DelayType(retry.CombineDelay(
-						retry.BackOffDelay, // exponential backoff
-						retry.RandomDelay,  // add jitter
-					)),
-					retry.RetryIf(func(err error) bool {
-						return !isConnRefused(err)
-					}),
-					retry.MaxDelay(5*time.Millisecond),
+					retry.Attempts(commons.BROKER_RETRY_ATTEMPTS), // 2 attempts
+					retry.Delay(2*time.Millisecond),
+					retry.MaxDelay(commons.BROKER_RETRY_MAX_DELAY),
+					retry.DelayType(retry.RandomDelay), // small jitter
 					retry.OnRetry(func(n uint, err error) {
-						logger.Warn("Retrying package send", zap.Int("serverID", serverID), zap.Int("attempt", int(n)+1), zap.Error(err))
+						logger.Warn("Retrying package send",
+							zap.Int("serverID", serverID),
+							zap.Int("attempt", int(n)+1),
+							zap.Error(err))
 					}),
 				)
 
@@ -498,9 +523,9 @@ func (b *Broker) protocolDaemon(ctx context.Context, nextRun time.Time) {
 		}
 
 		wg.Wait()
-		logger.Info("Next run will happen at", zap.Time("nextRun", nextRun))
+		logger.Warn("Next run will happen at", zap.Time("nextRun", nextRun))
 		if packageCounter == 500 {
-			logger.Info("5000 epochs done, ending experiment")
+			logger.Warn("5000 epochs done, ending experiment")
 			return
 		}
 	}
@@ -633,7 +658,7 @@ func main() {
 	core := zapcore.NewCore(
 		zapcore.NewJSONEncoder(encoderConfig),
 		writeSyncer,
-		zapcore.InfoLevel,
+		zapcore.WarnLevel,
 	)
 
 	logger = zap.New(core)
@@ -655,7 +680,7 @@ func main() {
 	}()
 
 	// Print the broker's address
-	logger.Info("Broker running on http://localhost:%d", zap.Int("port", broker.Port))
+	logger.Warn("Broker running on http://localhost:%d", zap.Int("port", broker.Port))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -675,12 +700,12 @@ func main() {
 	<-ctx.Done()
 
 	// Graceful shutdown
-	logger.Info("Shutting down broker...")
+	logger.Warn("Shutting down broker...")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	if err := broker.httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.Error("HTTP shutdown error", zap.Error(err))
 	}
-	logger.Info("Broker shutdown complete.")
+	logger.Warn("Broker shutdown complete.")
 
 }

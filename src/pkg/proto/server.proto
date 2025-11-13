@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package lfm.server.v1;
+
+option go_package = "lockfreemachine/src/pkg/gen/serverpb;serverpb";
+
+import "google/protobuf/empty.proto";
+
+message Operation {
+  int64  timestamp = 1;
+  string key       = 2;
+  string value     = 3;
+  int64  op        = 4;
+}
+
+message Transaction {
+  repeated Operation operations = 1;
+}
+
+message Package {
+  int32 broker_id     = 1;
+  int32 package_id    = 2;
+  repeated Transaction transactions = 3;
+}
+
+service ServerService {
+  rpc AddPackage(Package) returns (google.protobuf.Empty);
+}
