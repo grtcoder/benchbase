@@ -638,6 +638,5 @@ func TestRandomGraph(t *testing.T){
 			}
 		}
 	}
-
 	// Loop check for DAG
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/Workiva/go-datastructures/queue"
 	"github.com/avast/retry-go"
 	"github.com/gorilla/mux"
+	"github.com/dgraph-io/badger/v4"
 )
 
 const ( 
@@ -60,6 +61,7 @@ type Server struct {
 	ignoreBrokers map[int]*struct{}
 
 	packageArray *queue.RingBuffer
+	db badger.DB
 }
 
 func (s *Server) requestPackage(serverURL string,brokerID int,pkg *commons.Package) func() error {
