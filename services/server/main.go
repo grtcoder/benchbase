@@ -61,7 +61,7 @@ type Server struct {
 	ignoreBrokers map[int]*struct{}
 
 	packageArray *queue.RingBuffer
-	db badger.DB
+	db *badger.DB
 }
 
 func (s *Server) requestPackage(serverURL string,brokerID int,pkg *commons.Package) func() error {
@@ -577,12 +577,13 @@ func (s *Server) consumePackageArray() {
 		}
 
 		// Process the package
+		// normalOut
 		normalOut, err := dag.Schedule(pkg.Transactions,&s.counter)
 		if err != nil {
 			log.Println("Error scheduling transactions:", err)
 			continue
 		}
-		dag.ExecuteParallel(pkg.Transactions, normalOut)
+		dag.ExecuteParallel(s.db,pkg.Transactions, normalOut)
 	}
 }
 
@@ -621,6 +622,11 @@ func main() {
 		log.Fatalf("startTimestamp is required")
 	}
 
+	// Only in memory currently, will change later.
+	db, err := badger.OpenManaged(badger.DefaultOptions("").WithInMemory(true))
+	if err != nil {
+		log.Fatalf("Failed to open BadgerDB: %v", err)
+	}
 	server := &Server{
 		ip: serverIP,
 		port: serverPort,
@@ -629,6 +635,7 @@ func main() {
 		answer: make(map[int]*commons.StateList),
 		packageArray: queue.NewRingBuffer(BUFFER_SIZE),
 		writeChan: make(chan *commons.Package, WRITE_BUFFER_SIZE),
+		db: db,
 	}
 
 	httpServer,err := server.setupServer()

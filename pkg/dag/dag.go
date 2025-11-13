@@ -5,28 +5,50 @@ import (
 	"fmt"
 	"lockfreemachine/pkg/commons"
 	"sync/atomic"
+
+	"github.com/dgraph-io/badger/v4"
 )
 
 // TODO: Use this to interact with LSM tree
-func executeTransaction(tx *commons.Transaction) {
+func executeTransaction(db *badger.DB,tx *commons.Transaction){
+	txn := db.NewTransactionAt(uint64(tx.Timestamp), true)
 	for _, op := range tx.Operations {
 		switch op.Op {
 		case 1:
 			// Handle write
+			if err := txn.Set([]byte(op.Key), []byte(op.Value)); err != nil {
+				fmt.Printf("[T%d] ERROR writing key=%s, value=%s: %v\n", tx.Id, op.Key, op.Value, err)
+				continue
+			}
 			fmt.Printf("[T%d] WRITE key=%s, value=%s\n", tx.Id, op.Key, op.Value)
 		case 2:
 			// Handle delete
+			if err := txn.Delete([]byte(op.Key)); err != nil {
+				fmt.Printf("[T%d] ERROR deleting key=%s: %v\n", tx.Id, op.Key, err)
+				continue
+			}
 			fmt.Printf("[T%d] DELETE key=%s\n", tx.Id, op.Key)
 		case 3:
 			// Handle read
+			// We don't do anything with the read value yet.....
+			_, err := txn.Get([]byte(op.Key))
+			if err != nil {
+				fmt.Printf("[T%d] ERROR reading key=%s: %v\n", tx.Id, op.Key, err)
+				continue
+			}
 			fmt.Printf("[T%d] READ key=%s\n", tx.Id, op.Key)
 		default:
 			fmt.Printf("[T%d] Unknown operation: %d\n", tx.Id, op.Op)
 		}
 	}
+	if err := txn.CommitAt(uint64(tx.Timestamp), nil); err != nil {
+		fmt.Printf("[T%d] ERROR committing transaction: %v\n", tx.Id, err)
+	} else {
+		fmt.Printf("[T%d] COMMITTED at ts=%d\n", tx.Id, tx.Timestamp)
+	}
 }
 
-func ExecuteParallel(txs []*commons.Transaction, normalOut map[int]map[int]bool) []int {
+func ExecuteParallel(db *badger.DB,txs []*commons.Transaction, normalOut map[int]map[int]bool) []int {
 	n := len(txs)
 	inDegree := make(map[int]*atomic.Int32)
 	for i := 0; i < n; i++ {
@@ -51,7 +73,7 @@ func ExecuteParallel(txs []*commons.Transaction, normalOut map[int]map[int]bool)
 	for txID := range readyCh {
 		ordering=append(ordering,txID)
 				go func(txID int) {
-					executeTransaction(txs[txID])
+					executeTransaction(db,txs[txID])
 					numProcessed.Add(1)
 					// Record execution order
 						for v := range normalOut[txID] {

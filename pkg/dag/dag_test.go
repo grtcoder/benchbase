@@ -6,9 +6,12 @@ import (
 	"math/rand"
 	"reflect"
 	"testing"
+
+	"github.com/dgraph-io/badger/v4"
 )
 
 func TestBasic(t *testing.T) {
+	withDB(t, true, func(db *badger.DB) {
 	counter := 1
 	txs := []*commons.Transaction{
 		{
@@ -29,7 +32,7 @@ func TestBasic(t *testing.T) {
 		{
 			Id: 2,
 			Operations: []*commons.Operation{
-				{Op: 1, Key: "B", Value: ""},
+				{Op: 1, Key: "B", Value: "val2"},
 			},
 			Timestamp: int64(0),
 		},
@@ -53,7 +56,7 @@ func TestBasic(t *testing.T) {
 		{
 			Id: 2,
 			Operations: []*commons.Operation{
-				{Op: 1, Key: "B", Value: ""},
+				{Op: 1, Key: "B", Value: "val2"},
 		},
 		Timestamp: int64(3),
 		},
@@ -66,7 +69,7 @@ func TestBasic(t *testing.T) {
 	if !reflect.DeepEqual(txs, expectedTxs) {
 		t.Errorf("Expected scheduled map to be %#v, got %#v", expectedTxs,txs)
 	}
-	ordering := ExecuteParallel(txs, normalOut)
+	ordering := ExecuteParallel(db,txs, normalOut)
 	t.Log(ordering)
 	for i:=0 ; i<len(ordering); i++{
 		for j:=i+1 ; j<len(ordering); j++{
@@ -78,8 +81,10 @@ func TestBasic(t *testing.T) {
 			}
 		}
 	}
+	})
 }
 func TestLoop(t *testing.T) {
+	withDB(t, true, func(db *badger.DB) {
 	counter := 1
 	txs := []*commons.Transaction{
 		{
@@ -141,7 +146,7 @@ func TestLoop(t *testing.T) {
 	if !reflect.DeepEqual(txs, expectedTxs) {
 		t.Errorf("Expected scheduled map to be %#v, got %#v", expectedTxs,txs)
 	}
-	ordering := ExecuteParallel(txs, normalOut)
+	ordering := ExecuteParallel(db,txs, normalOut)
 	t.Log(ordering)
 	for i:=0 ; i<len(ordering); i++{
 		for j:=i+1 ; j<len(ordering); j++{
@@ -153,9 +158,11 @@ func TestLoop(t *testing.T) {
 			}
 		}
 	}
+	})
 }
 
 func TestDoubleEdgedLoop(t *testing.T) {
+	withDB(t, true, func(db *badger.DB) {
 	counter := 1
 	txs := []*commons.Transaction{
 		{
@@ -229,7 +236,7 @@ func TestDoubleEdgedLoop(t *testing.T) {
 	if !reflect.DeepEqual(txs, expectedTxs) {
 		t.Errorf("Expected scheduled map to be %#v, got %#v", expectedTxs,txs)
 	}
-	ordering := ExecuteParallel(txs, normalOut)
+	ordering := ExecuteParallel(db,txs, normalOut)
 	t.Log(ordering)
 	for i:=0 ; i<len(ordering); i++{
 		for j:=i+1 ; j<len(ordering); j++{
@@ -241,9 +248,11 @@ func TestDoubleEdgedLoop(t *testing.T) {
 			}
 		}
 	}
+})
 }
 
 func TestMultiLoop(t *testing.T) {
+	withDB(t, true, func(db *badger.DB) {
 	counter := 1
 	txs := []*commons.Transaction{
 		{
@@ -365,7 +374,7 @@ func TestMultiLoop(t *testing.T) {
 	if !reflect.DeepEqual(txs, expectedTxs) {
 		t.Errorf("Expected scheduled map to be %#v, got %#v", expectedTxs,txs)
 	}
-	ordering := ExecuteParallel(txs, normalOut)
+	ordering := ExecuteParallel(db,txs, normalOut)
 	t.Log(ordering)
 	for i:=0 ; i<len(ordering); i++{
 		for j:=i+1 ; j<len(ordering); j++{
@@ -377,9 +386,11 @@ func TestMultiLoop(t *testing.T) {
 			}
 		}
 	}
+})
 }
 
 func TestIdealWithMultiLoop(t *testing.T) {
+	withDB(t, true, func(db *badger.DB) {
 	counter := 1
 	txs := []*commons.Transaction{
 		{
@@ -555,7 +566,7 @@ func TestIdealWithMultiLoop(t *testing.T) {
 	if !reflect.DeepEqual(txs, expectedTxs) {
 		t.Errorf("Expected scheduled map to be %#v, got %#v", expectedTxs,txs)
 	}
-	ordering := ExecuteParallel(txs, normalOut)
+	ordering := ExecuteParallel(db,txs, normalOut)
 	t.Log(ordering)
 	for i:=0 ; i<len(ordering); i++{
 		for j:=i+1 ; j<len(ordering); j++{
@@ -567,6 +578,7 @@ func TestIdealWithMultiLoop(t *testing.T) {
 			}
 		}
 	}
+})
 }
 
 func generateRandomTransactions(graph map[int]map[int]struct{}, n int64) []*commons.Transaction {
@@ -612,6 +624,31 @@ func generateRandomGraph(n int64, edgeProb float64) map[int]map[int]struct{} {
 	}
 	// Add edges based on edgeProb
 	return graph
+}
+
+func withDB(tb testing.TB, managed bool, fn func(db *badger.DB)) {
+	tb.Helper()
+
+	// Use an isolated temp dir for each test/bench.
+	opts := badger.DefaultOptions(tb.TempDir())
+	// Keep it simple/fast and reduce background noise.
+	opts.NumCompactors = 0
+	opts.CompactL0OnClose = false
+
+	var (
+		db  *badger.DB
+		err error
+	)
+	if managed {
+		db, err = badger.OpenManaged(opts)
+	} else {
+		db, err = badger.Open(opts)
+	}
+	if err != nil {
+		tb.Fatalf("open DB: %v", err)
+	}
+	tb.Cleanup(func() { _ = db.Close() })
+	fn(db)
 }
 
 func TestRandomGraph(t *testing.T){
