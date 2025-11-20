@@ -1,8 +1,8 @@
 package main
 
 import (
-	"lockfreemachine/src/pkg/commons"
-	serverpb "lockfreemachine/src/pkg/gen"
+	"lockfreemachine/pkg/commons"
+	serverpb "lockfreemachine/pkg/gen"
 )
 
 func pbToCommonsPackage(p *serverpb.Package) *commons.Package {

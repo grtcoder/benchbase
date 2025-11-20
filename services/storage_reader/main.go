@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"lockfreemachine/src/pkg/commons"
+	"lockfreemachine/pkg/commons"
 	"net/http"
 	"os"
 	"os/signal"

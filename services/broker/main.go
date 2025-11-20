@@ -8,7 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"lockfreemachine/src/pkg/commons"
+	"lockfreemachine/pkg/commons"
 	"math/rand"
 	"net"
 	"net/http"

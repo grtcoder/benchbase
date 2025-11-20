@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"lockfreemachine/src/pkg/commons"
+	"lockfreemachine/pkg/commons"
 
 	"github.com/gorilla/mux"
 )
