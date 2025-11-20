@@ -41,6 +41,7 @@ CMakeCache.txt
 scripts/broker
 scripts/directory
 scripts/server
+scripts/storage-reader
 
 *.log
 
