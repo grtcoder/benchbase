@@ -8,7 +8,7 @@ import (
 func TestBasic(t *testing.T) {
 	// TC1: Check Initialization
 	list := NewStateList()
-	if list.GetState() != int32(Undefined) {
+	if list.GetState() != Undefined {
 		t.Errorf("Expected state to be Undefined, got %d", list.GetState())
 	}
 
@@ -23,7 +23,7 @@ func TestBasic(t *testing.T) {
 	}
 
 	// TC3: Check series of updates
-	ls := []int32{NotReceived, Received, IgnoreBroker, Undefined}
+	ls := []int{NotReceived, Received, IgnoreBroker, Undefined}
 	
 	for _, state := range ls {
 		newNode := &StateNode{val: &StateValue{}}
@@ -41,14 +41,14 @@ func TestRaceUpdates(t *testing.T) {
 			t.Errorf("Expected state to be Null, got %d", list.GetState())
 	}
 
-	threadsData := [][]int32{
+	threadsData := [][]int{
 			{NotReceived, Received, IgnoreBroker, Undefined, NotReceived},
 			{Received, IgnoreBroker, Undefined, NotReceived},
 			{IgnoreBroker, Undefined, NotReceived, Received},
 			{Undefined, NotReceived, Received, IgnoreBroker},
 	}
-	expectedList := []int32{}
-	ch := make(chan int32) // Creates a channel that carries integers
+	expectedList := []int{}
+	ch := make(chan int) // Creates a channel that carries integers
 
 	var finalWg sync.WaitGroup
 	finalWg.Add(1)
@@ -93,7 +93,7 @@ func TestRaceUpdates(t *testing.T) {
 	temp := list.head
 	ind := len(expectedList) - 1
 	for temp.GetState() != Undefined {
-		if temp.GetState() != int32(expectedList[ind]) {
+		if temp.GetState() != int(expectedList[ind]) {
 			t.Fatalf("Expected state to be %d, got %d", expectedList[ind], temp.GetState())
 		}
 		temp = temp.next
