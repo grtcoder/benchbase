@@ -24,7 +24,6 @@ const (
 
 type Operation struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Timestamp     int64                  `protobuf:"varint,1,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 	Key           string                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
 	Value         string                 `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
 	Op            int64                  `protobuf:"varint,4,opt,name=op,proto3" json:"op,omitempty"`
@@ -62,13 +61,6 @@ func (*Operation) Descriptor() ([]byte, []int) {
 	return file_server_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *Operation) GetTimestamp() int64 {
-	if x != nil {
-		return x.Timestamp
-	}
-	return 0
-}
-
 func (x *Operation) GetKey() string {
 	if x != nil {
 		return x.Key
@@ -92,7 +84,8 @@ func (x *Operation) GetOp() int64 {
 
 type Transaction struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Operations    []*Operation           `protobuf:"bytes,1,rep,name=operations,proto3" json:"operations,omitempty"`
+	Timestamp     int64                  `protobuf:"varint,1,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	Operations    []*Operation           `protobuf:"bytes,2,rep,name=operations,proto3" json:"operations,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -125,6 +118,13 @@ func (x *Transaction) ProtoReflect() protoreflect.Message {
 // Deprecated: Use Transaction.ProtoReflect.Descriptor instead.
 func (*Transaction) Descriptor() ([]byte, []int) {
 	return file_server_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *Transaction) GetTimestamp() int64 {
+	if x != nil {
+		return x.Timestamp
+	}
+	return 0
 }
 
 func (x *Transaction) GetOperations() []*Operation {
@@ -198,15 +198,15 @@ var File_server_proto protoreflect.FileDescriptor
 
 const file_server_proto_rawDesc = "" +
 	"\n" +
-	"\fserver.proto\x12\rlfm.server.v1\x1a\x1bgoogle/protobuf/empty.proto\"a\n" +
-	"\tOperation\x12\x1c\n" +
-	"\ttimestamp\x18\x01 \x01(\x03R\ttimestamp\x12\x10\n" +
+	"\fserver.proto\x12\rlfm.server.v1\x1a\x1bgoogle/protobuf/empty.proto\"C\n" +
+	"\tOperation\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x03 \x01(\tR\x05value\x12\x0e\n" +
-	"\x02op\x18\x04 \x01(\x03R\x02op\"G\n" +
-	"\vTransaction\x128\n" +
+	"\x02op\x18\x04 \x01(\x03R\x02op\"e\n" +
+	"\vTransaction\x12\x1c\n" +
+	"\ttimestamp\x18\x01 \x01(\x03R\ttimestamp\x128\n" +
 	"\n" +
-	"operations\x18\x01 \x03(\v2\x18.lfm.server.v1.OperationR\n" +
+	"operations\x18\x02 \x03(\v2\x18.lfm.server.v1.OperationR\n" +
 	"operations\"\x85\x01\n" +
 	"\aPackage\x12\x1b\n" +
 	"\tbroker_id\x18\x01 \x01(\x05R\bbrokerId\x12\x1d\n" +

@@ -7,14 +7,14 @@ option go_package = "lockfreemachine/src/pkg/gen/serverpb;serverpb";
 import "google/protobuf/empty.proto";
 
 message Operation {
-  int64  timestamp = 1;
   string key       = 2;
   string value     = 3;
   int64  op        = 4;
 }
 
 message Transaction {
-  repeated Operation operations = 1;
+  int64  timestamp = 1;
+  repeated Operation operations = 2;
 }
 
 message Package {
