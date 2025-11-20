@@ -98,13 +98,14 @@ func (n *NodesMap) CheckAndUpdateMap(newDirectoryMap *NodesMap) {
 }
 
 type Operation struct {
-	Timestamp int64  `json:"timestamp"`
-	Key       string `json:"key"`
-	Value     string `json:"value"`
-	Op        int64  `json:"op"`
+	Key string `json:"key"`	
+	Value string `json:"value"`
+	Op int64 `json:"op"` // Operation type: 1 (Write), 2 (Delete), 3 (Read)
 }
 
 type Transaction struct {
+	Id int64 `json:"id"`
+	Timestamp int64 `json:"timestamp"`
 	Operations []*Operation `json:"operations"`
 }
 
@@ -142,11 +143,11 @@ type Package struct {
 func DummyTransactions() []*Transaction {
 	// Create a dummy transaction with some operations
 	operations := []*Operation{
-		{Timestamp: 1, Key: "key1", Value: "value1", Op: 1},
-		{Timestamp: 2, Key: "key2", Value: "value2", Op: 2},
+		{ Key: "key1", Value: "value1", Op: 1},
+		{ Key: "key2", Value: "value2", Op: 2},
 	}
 	return []*Transaction{
-		{Operations: operations},
+		{Timestamp: 1,Operations: operations},
 	}
 }
 

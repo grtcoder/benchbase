@@ -14,15 +14,16 @@ func pbToCommonsPackage(p *serverpb.Package) *commons.Package {
 		ops := make([]*commons.Operation, 0, len(t.GetOperations()))
 		for _, o := range t.GetOperations() {
 			ops = append(ops, &commons.Operation{
-				Timestamp: o.GetTimestamp(),
 				Key:       o.GetKey(),
 				Value:     o.GetValue(),
 				Op:        o.GetOp(),
 			})
 		}
-		txs = append(txs, &commons.Transaction{Operations: ops})
+		txs = append(txs, &commons.Transaction{Timestamp: t.GetTimestamp(),
+			Operations: ops})
 	}
 	return &commons.Package{
+
 		BrokerID:     int(p.GetBrokerId()),
 		PackageID:    int(p.GetPackageId()),
 		Transactions: txs,

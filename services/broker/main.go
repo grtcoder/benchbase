@@ -541,11 +541,11 @@ func (b *Broker) DummyPackage(packageCounter, nOperation, nTransaction int) *com
 				Key:       fmt.Sprintf("key%d", i),
 				Value:     fmt.Sprintf("value%d", i),
 				Op:        1,
-				Timestamp: time.Now().UnixNano(),
 			}
 			operations = append(operations, operation)
 		}
 		transaction := &commons.Transaction{
+			Timestamp: time.Now().UnixNano(),
 			Operations: operations,
 		}
 		transactions = append(transactions, transaction)
