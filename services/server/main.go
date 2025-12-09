@@ -9,6 +9,7 @@ import (
 	"lockfreemachine/pkg/commons"
 	"lockfreemachine/pkg/dag"
 
+	"errors"
 	"log"
 	"math/rand"
 	"net"
@@ -21,14 +22,12 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"errors"
 
 	"encoding/json"
 
-	"github.com/Workiva/go-datastructures/queue"
 	"github.com/avast/retry-go"
-	"github.com/gorilla/mux"
 	"github.com/dgraph-io/badger/v4"
+	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -40,9 +39,6 @@ import (
 var logger *zap.Logger
 
 const (
-	// Maximum number of packages the package Array can hold.
-	BUFFER_SIZE = 100000
-
 	// Maximum number of packages the write channel can hold.
 	WRITE_BUFFER_SIZE = 1000
 )
@@ -241,7 +237,6 @@ func findSetDifference(list1, list2 []int) []int {
 
 // Server struct represents the server instance.
 type Server struct {
-
 	ip             string // IP address of the server
 	port           int    // Port number of the server
 	readerPort     int    //port number of the reader service, the ip remains the same.
@@ -251,8 +246,8 @@ type Server struct {
 	serverID       int                   // Server ID
 	writeChan      chan *commons.Package // Channel to write packages to files
 	//answer            map[int]*commons.StateList // Map of broker IDs to their states
-	packageArray      *queue.RingBuffer // Array to hold packages
-	dropRate          float64           // api requests
+	packageArray      *commons.PackageList // Lock-free list to hold packages
+	dropRate          float64              // api requests
 	packageCountStart int
 	startTimestamp    time.Time
 	//mu                sync.RWMutex
@@ -260,8 +255,8 @@ type Server struct {
 	answer0    map[int]*commons.StateList
 	answer1    map[int]*commons.StateList
 	active     atomic.Pointer[map[int]*commons.StateList]
-	db *badger.DB
-	counter int
+	db         *badger.DB
+	counter    int
 }
 
 // requestPackage sends a request to the server to get a package.
@@ -693,7 +688,7 @@ func (s *Server) handleAddPackage(w http.ResponseWriter, r *http.Request) {
 			if ok := sl.UpdateState(head,
 				commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg}),
 			); ok {
-				s.packageArray.Put(pkg)
+				s.packageArray.Push(pkg)
 				s.writeChan <- pkg
 			}
 		}(p, h, sl)
@@ -816,7 +811,7 @@ func (s *Server) handleBrokerOk(w http.ResponseWriter, r *http.Request) {
 			head := sl.GetHead()
 			if head != nil && head.GetState() == commons.NotReceived {
 				if sl.UpdateState(sl.GetHead(), commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})) {
-					s.packageArray.Put(pkg)
+					s.packageArray.Push(pkg)
 					s.writeChan <- pkg
 				}
 			}
@@ -938,7 +933,7 @@ func (s *Server) requestPackages(endpoint string, brokerList []int) {
 					head := sl.GetHead()
 					if head != nil && head.GetState() == commons.NotReceived {
 						if sl.UpdateState(sl.GetHead(), commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})) {
-							s.packageArray.Put(pkg)
+							s.packageArray.Push(pkg)
 							s.writeChan <- pkg
 						}
 					}
@@ -979,7 +974,7 @@ func (s *Server) requestPackagesFromStorage(endpoint string, brokerList []int) {
 					head := sl.GetHead()
 					if head != nil && head.GetState() == commons.NotReceived {
 						if sl.UpdateState(head, commons.NewStateNode(&commons.StateValue{State: commons.Received, Pkg: pkg})) {
-							s.packageArray.Put(pkg)
+							s.packageArray.Push(pkg)
 							s.writeChan <- pkg
 						}
 					}
@@ -1324,7 +1319,7 @@ func (s *Server) protocolDaemon(ctx context.Context, nextRun time.Time) {
 		//s.setupAnswerMap()   // set up the answer map for the next epoch
 		curLen := s.packageArray.Len()
 		logger.Info("Protocol Completed")
-		logger.Warn("Cur package array length: ", zap.Uint64("curLen", curLen))
+		logger.Warn("Cur package array length: ", zap.Int64("curLen", curLen))
 		logger.Warn("Time time time: ", zap.Float64("duration", duration))
 		logger.Warn("Next run will happen at: ", zap.Time("nextRun", nextRun))
 		if s.packageCounter == 500 {
@@ -1350,12 +1345,12 @@ func (s *Server) consumePackageArray() {
 
 		// Process the package
 		// normalOut
-		normalOut, err := dag.Schedule(pkg.Transactions,&s.counter)
+		normalOut, err := dag.Schedule(pkg.Transactions, &s.counter)
 		if err != nil {
 			log.Println("Error scheduling transactions:", err)
 			continue
 		}
-		dag.ExecuteParallel(s.db,pkg.Transactions, normalOut)
+		dag.ExecuteParallel(s.db, pkg.Transactions, normalOut)
 	}
 }
 
@@ -1457,7 +1452,7 @@ func main() {
 		DirectoryInfo:  &commons.NodesMap{},
 		answer0:        make(map[int]*commons.StateList),
 		answer1:        make(map[int]*commons.StateList),
-		packageArray:   queue.NewRingBuffer(BUFFER_SIZE),
+		packageArray:   commons.NewPackageList(),
 		writeChan:      make(chan *commons.Package, WRITE_BUFFER_SIZE),
 		dropRate:       dropRate,
 		canReceive:     true,

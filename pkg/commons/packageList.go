@@ -6,119 +6,133 @@ import (
 )
 
 type PackageNode struct {
-	prev *PackageNode
+	pkg  *Package
 	next *PackageNode
-	Pkg  *Package
-}
-
-type PackageList struct {
-	head   *PackageNode
-	tail   *PackageNode
-	length int64
 }
 
 func NewPackageNode(pkg *Package) *PackageNode {
 	return &PackageNode{
-		Pkg: pkg,
+		pkg: pkg,
 	}
 }
 
-// Put -> prepends new package node to the list
-func (l *PackageList) Put(pkg *Package) {
-	newNode := NewPackageNode(pkg)
+func (n *PackageNode) GetPackage() *Package {
+	return n.pkg
+}
 
-	for {
-		oldHeadPtr := atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&l.head)))
-		oldHead := (*PackageNode)(oldHeadPtr)
+func (n *PackageNode) GetNext() *PackageNode {
+	return n.next
+}
 
-		newNode.next = oldHead
+type PackageList struct {
+	head *PackageNode
+	len  int64
+}
 
-		if oldHead != nil {
-			oldHead.prev = newNode
-		} else {
-			// List was empty, set tail to new node
-			l.tail = newNode
-		}
-
-		if atomic.CompareAndSwapPointer(
-			(*unsafe.Pointer)(unsafe.Pointer(&l.head)),
-			oldHeadPtr,
-			unsafe.Pointer(newNode),
-		) {
-			atomic.AddInt64(&l.length, 1)
-			return
-		}
+func NewPackageList() *PackageList {
+	return &PackageList{
+		head: nil,
+		len:  0,
 	}
 }
 
-// GetHead() returns the head package node
+// GetHead atomically loads the current head
 func (l *PackageList) GetHead() *PackageNode {
 	ptr := atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&l.head)))
 	return (*PackageNode)(ptr)
 }
 
-// GetTail() returns the tail package node
-func (l *PackageList) GetTail() *PackageNode {
-	ptr := atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&l.tail)))
-	return (*PackageNode)(ptr)
-}
-
-// Length returns the length of the package list
-func (l *PackageList) Length() int64 {
-	return atomic.LoadInt64(&l.length)
-}
-
-func NewPackageList() *PackageList {
-	return &PackageList{}
-}
-
-// Return the node stored at a certain index
-func (l *PackageList) GetAtIndex(index int64) *PackageNode {
-	if index < 0 || index >= l.Length() {
-		return nil
-	}
-	current := l.GetHead()
-	var i int64 = 0
-	for current != nil && i < index {
-		current = current.next
-		i++
-	}
-	return current
-}
-
-// Delete a node from the list
-func (l *PackageList) Delete(node *PackageNode) {
-	if node == nil {
-		return
-	}
-
-	// Update the previous node's next pointer
-	if node.prev != nil {
-		node.prev.next = node.next
-	} else {
-		// Node is head
-		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&l.head)), unsafe.Pointer(node.next))
-	}
-
-	// Update the next node's prev pointer
-	if node.next != nil {
-		node.next.prev = node.prev
-	} else {
-		// Node is tail
-		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&l.tail)), unsafe.Pointer(node.prev))
-	}
-
-	atomic.AddInt64(&l.length, -1)
-}
-
-// find first node with given package ID
-func (l *PackageList) FindByPackageID(packageID int) *PackageNode {
-	current := l.GetHead()
-	for current != nil {
-		if current.Pkg != nil && current.Pkg.PackageID == packageID {
-			return current
+// Push atomically adds a new package to the head of the list.
+func (l *PackageList) Push(pkg *Package) {
+	newNode := NewPackageNode(pkg)
+	for {
+		currHead := l.GetHead()
+		newNode.next = currHead
+		if atomic.CompareAndSwapPointer(
+			(*unsafe.Pointer)(unsafe.Pointer(&l.head)),
+			unsafe.Pointer(currHead),
+			unsafe.Pointer(newNode),
+		) {
+			atomic.AddInt64(&l.len, 1)
+			return
 		}
-		current = current.next
 	}
-	return nil
+}
+
+func (l *PackageList) PeekHead() *PackageNode {
+	return l.GetHead()
+}
+
+// TryRemoveNode attempts to remove a node from the head position.
+// Returns true if the node was successfully removed.
+// Returns false if the node is no longer at the head (writers pushed new nodes).
+func (l *PackageList) TryRemoveNode(node *PackageNode) bool {
+	if node == nil {
+		return false
+	}
+	if atomic.CompareAndSwapPointer(
+		(*unsafe.Pointer)(unsafe.Pointer(&l.head)),
+		unsafe.Pointer(node),
+		unsafe.Pointer(node.next),
+	) {
+		atomic.AddInt64(&l.len, -1)
+		return true
+	}
+	return false
+}
+
+// RemoveNode removes a specific node from the list, even if it's not at the head.
+// Safe for single reader only.
+// Returns true if the node was found and removed, false if not found.
+func (l *PackageList) RemoveNode(target *PackageNode) bool {
+	if target == nil {
+		return false
+	}
+
+	// If node at head try to remove it.
+	if l.TryRemoveNode(target) {
+		return true
+	}
+
+	// node is not at head, so we find it and remove it from the list.
+	// Maybe: A doubly linked list would be better here.
+	for {
+		head := l.GetHead()
+		if head == nil {
+			return false
+		}
+
+		// Check if target is the head (race with TryRemoveNode)
+		if head == target {
+			if l.TryRemoveNode(target) {
+				return true
+			}
+			continue
+		}
+
+		// Traverse to find the node before target
+		prev := head
+		curr := prev.next
+		for curr != nil && curr != target {
+			prev = curr
+			curr = curr.next
+		}
+
+		if curr == nil {
+			return false
+		}
+
+		// Found node so we can delete it.
+		prev.next = target.next
+		atomic.AddInt64(&l.len, -1)
+		return true
+	}
+}
+
+func (l *PackageList) Len() int64 {
+	return atomic.LoadInt64(&l.len)
+}
+
+func (l *PackageList) IsEmpty() bool {
+	return l.GetHead() == nil
 }
