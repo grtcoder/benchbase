@@ -1,4 +1,4 @@
-package main
+package storage_reader
 
 import (
 	"context"
@@ -119,7 +119,7 @@ func (s *ReadingServer) setupServer() (*http.Server, error) {
 	}, nil
 }
 
-func main() {
+func Main() {
 
 	// Parse command line arguments
 	var directoryIP string

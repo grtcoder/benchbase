@@ -83,6 +83,109 @@ func TestBasic(t *testing.T) {
 	}
 	})
 }
+
+func TestSelfLoop(t *testing.T) {
+}
+
+func TestBug(t *testing.T) {
+	withDB(t, true, func(db *badger.DB) {
+	counter := 1
+	txs := []*commons.Transaction{
+		{
+			Id: 0, 
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "A", Value: "val1"},
+			},
+			Timestamp: int64(0),
+		},
+		{
+			Id: 1,
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "A", Value: ""},
+			},
+			Timestamp: int64(0),
+		},
+		{
+			Id: 2,
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "A", Value: "val2"},
+			},
+			Timestamp: int64(0),
+		},
+		{
+			Id: 3,
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "A", Value: "val2"},
+			},
+			Timestamp: int64(0),
+		},
+		{
+			Id: 4,
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "A", Value: "val2"},
+			},
+			Timestamp: int64(0),
+		},
+	}
+	expectedTxs := []*commons.Transaction{
+		{
+			Id: 0, 
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "A", Value: "val1"},
+			},
+			Timestamp: int64(3),
+		},
+		{
+			Id: 1,
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "A", Value: ""},
+			},
+			Timestamp: int64(1),
+		},
+		{
+			Id: 2,
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "A", Value: "val2"},
+			},
+			Timestamp: int64(4),
+		},
+		{
+			Id: 3,
+			Operations: []*commons.Operation{
+				{Op: 3, Key: "A", Value: "val2"},
+			},
+			Timestamp: int64(2),
+		},
+		{
+			Id: 4,
+			Operations: []*commons.Operation{
+				{Op: 1, Key: "A", Value: "val2"},
+			},
+			Timestamp: int64(5),
+		},
+	}
+	normalOut,err := Schedule(txs,&counter)
+	if err!=nil {
+		t.Errorf("Error in scheduling: %s",err)
+	}
+
+	if !reflect.DeepEqual(txs, expectedTxs) {
+		t.Errorf("Expected scheduled map to be %#v, got %#v", expectedTxs,txs)
+	}
+	ordering := ExecuteParallel(db,txs, normalOut)
+	t.Log(ordering)
+	for i:=0 ; i<len(ordering); i++{
+		for j:=i+1 ; j<len(ordering); j++{
+			u:=ordering[i]
+			v:=ordering[j]
+			t.Logf("Checking edge from %d to %d",v,u)
+			if _,ok:=normalOut[v][u];ok {
+				t.Errorf("Unexpected edge from %d to %d in normalOut found",v,u)
+			}
+		}
+	}
+	})
+}
 func TestLoop(t *testing.T) {
 	withDB(t, true, func(db *badger.DB) {
 	counter := 1

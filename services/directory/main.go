@@ -1,4 +1,4 @@
-package main
+package directory
 
 import (
 	"context"
@@ -165,7 +165,7 @@ func protocolDaemon() {
 	// We want the ticker to have millisecond precision
 	ticker := time.NewTicker(time.Millisecond)
 	// logger.Info("Next run will happen at", zap.Time("nextRun", nextRun))
-	log.Println("nextRun: ", nextRunTime.Load().(time.Time))
+	// log.Println("nextRun: ", nextRunTime.Load().(time.Time))
 
 	for tc := range ticker.C {
 		nr := nextRunTime.Load().(time.Time)
@@ -178,7 +178,7 @@ func protocolDaemon() {
 		atomic.AddInt64(&packageCounter, 1)
 
 		//logger.Info("Next run will happen at", zap.Time("nextRun", nextRun))
-		log.Println("nextRun: ", nextRunTime.Load().(time.Time))
+		// log.Println("nextRun: ", nextRunTime.Load().(time.Time))
 		epochNum := atomic.LoadInt64(&packageCounter)
 		if epochNum == 500 {
 			log.Println("5000 epochs done, ending experiment")
@@ -187,7 +187,7 @@ func protocolDaemon() {
 	}
 }
 
-func main() {
+func Main() {
 
 	var startTimestamp int64
 	flag.Int64Var(&startTimestamp, "startTimestamp", 0, "Start timestamp")

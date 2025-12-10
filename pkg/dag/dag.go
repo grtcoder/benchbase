@@ -11,6 +11,7 @@ import (
 
 // TODO: Use this to interact with LSM tree
 func executeTransaction(db *badger.DB,tx *commons.Transaction){
+	fmt.Printf("Executing Transaction T%d at ts=%d\n", tx.Id, tx.Timestamp)
 	txn := db.NewTransactionAt(uint64(tx.Timestamp), true)
 	for _, op := range tx.Operations {
 		switch op.Op {
@@ -49,6 +50,8 @@ func executeTransaction(db *badger.DB,tx *commons.Transaction){
 }
 
 func ExecuteParallel(db *badger.DB,txs []*commons.Transaction, normalOut map[int]map[int]bool) []int {
+	fmt.Println("Executing transactions in parallel based on DAG...")
+	fmt.Printf("Transactions: %#v\n",txs)
 	n := len(txs)
 	inDegree := make(map[int]*atomic.Int32)
 	for i := 0; i < n; i++ {
@@ -68,11 +71,13 @@ func ExecuteParallel(db *badger.DB,txs []*commons.Transaction, normalOut map[int
 	}
 
 	ordering:= []int{}
+	fmt.Printf("Initial ready transactions: ")
 	// Spawn worker goroutines
 	var numProcessed atomic.Int64
 	for txID := range readyCh {
 		ordering=append(ordering,txID)
 				go func(txID int) {
+					fmt.Printf("T%d processing", txID)
 					executeTransaction(db,txs[txID])
 					numProcessed.Add(1)
 					// Record execution order
@@ -108,7 +113,7 @@ func Schedule(txs []*commons.Transaction,counter *int) (map[int]map[int]bool, er
 	writes := make(map[string][]int)
 	for i, tx := range txs {
 		for _, op := range tx.Operations {
-			if op.Op == 1 { // Write
+			if op.Op == 1 || op.Op == 2 { // Writes and Deletes
 				writes[op.Key] = append(writes[op.Key], i)
 			}
 		}
@@ -119,8 +124,10 @@ func Schedule(txs []*commons.Transaction,counter *int) (map[int]map[int]bool, er
 		for _, op := range tx.Operations {
 			if op.Op == 3 { // Read
 				for _, i := range writes[op.Key] {
-					loopOut[i][j] = true
-					loopIn[j][i] = true
+					if i!=j {
+						loopOut[i][j] = true
+						loopIn[j][i] = true
+					}
 				}
 			}
 		}
@@ -202,6 +209,7 @@ func Schedule(txs []*commons.Transaction,counter *int) (map[int]map[int]bool, er
 	// --- Phase 4: Build Final Execution Order ---
 	for id,t := range TS {
 		txs[id].Timestamp = int64(t)
+		fmt.Printf("Transaction T%d assigned timestamp %d\n", id, t)
 	}
 	// execOrder := make([]int, n)
 	// for id, t := range TS {

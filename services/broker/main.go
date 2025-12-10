@@ -1,4 +1,4 @@
-package main
+package broker
 
 import (
 	"bytes"
@@ -313,6 +313,7 @@ func (b *Broker) register() error {
 	b.DirectoryInfo = &respStruct.NodesInfo
 
 	logger.Info("Directory info received", zap.Any("directoryInfo", b.DirectoryInfo))
+	logger.Info("First timestamp",zap.Any("timestamp", ETime))
 	b.ID = b.DirectoryInfo.BrokerMap.Version
 	b.startTimestamp = ETime
 	b.packageCountStart = int(ENumber)
@@ -429,7 +430,7 @@ func (b *Broker) protocolDaemon(ctx context.Context, nextRun time.Time) {
 
 	// We want the ticker to have millisecond precision
 	//ticker := time.NewTicker(time.Millisecond)
-	logger.Warn("Next run will happen at", zap.Time("nextRun", nextRun))
+	logger.Warn("Next run will happen a t", zap.Time("nextRun", nextRun))
 
 	for {
 		// Sleep until the next deadline or until we're asked to stop
@@ -452,10 +453,10 @@ func (b *Broker) protocolDaemon(ctx context.Context, nextRun time.Time) {
 
 		var pkg *commons.Package
 		if b.isTest {
-			pkg = b.DummyPackage(packageCounter, 10, 10)
+			pkg = b.DummyPackage(packageCounter, 5, 5)
 		} else {
 			//pkg = b.CreatePackage(packageCounter)
-			pkg = b.DummyPackage(packageCounter, 10, 10)
+			pkg = b.DummyPackage(packageCounter, 5, 5)
 		}
 
 		logger.Warn("Creating package", zap.Int("packageID", pkg.PackageID), zap.Int("transactionsCount", len(pkg.Transactions)))
@@ -534,22 +535,38 @@ func (b *Broker) protocolDaemon(ctx context.Context, nextRun time.Time) {
 
 func (b *Broker) DummyPackage(packageCounter, nOperation, nTransaction int) *commons.Package {
 	var transactions []*commons.Transaction
+	v := int64(1)
 	for j := 0; j < nTransaction; j++ {
+		if j%2 == 0 {
+			v=1
+			// Write are even
+		} else {
+			v=3
+			// Read are odd
+		}
 		var operations []*commons.Operation
 		for i := 0; i < nOperation; i++ {
 			operation := &commons.Operation{
 				Key:       fmt.Sprintf("key%d", i),
 				Value:     fmt.Sprintf("value%d", i),
-				Op:        1,
-			}
+				Op:        v,
+			} 
 			operations = append(operations, operation)
 		}
+		// for i := 0; i < nOperation; i++ {
+		// 	operation := &commons.Operation{
+		// 		Key:       fmt.Sprintf("key%d", i),
+		// 		Value:     fmt.Sprintf("value%d", i),
+		// 		Op:        3,
+		// 	} 
+		// 	operations = append(operations, operation)
+		// }
 		transaction := &commons.Transaction{
 			Timestamp: time.Now().UnixNano(),
 			Operations: operations,
 		}
 		transactions = append(transactions, transaction)
-	}
+		}
 
 	pkg := &commons.Package{
 		BrokerID:     b.ID,
@@ -593,7 +610,7 @@ func (b *Broker) CreatePackage(packageCounter int) *commons.Package {
 	return pkg
 }
 
-func main() {
+func Main() {
 	// Parse command line arguments
 	var directoryIP string
 	var directoryPort int

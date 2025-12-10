@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"bytes"
@@ -56,10 +56,10 @@ var (
 func initMetrics(serverID int) {
 
 	// Create a wrapped Registerer that injects labels
-	wrappedRegisterer := prometheus.WrapRegistererWith(
-		prometheus.Labels{"serverID": fmt.Sprint(serverID)}, // <- static label here
-		prometheus.DefaultRegisterer,
-	)
+	// wrappedRegisterer := prometheus.WrapRegistererWith(
+	// 	prometheus.Labels{"serverID": fmt.Sprint(serverID)}, // <- static label here
+	// 	prometheus.DefaultRegisterer,
+	// )
 
 	httpRequests = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -120,13 +120,13 @@ func initMetrics(serverID int) {
 		[]string{"epoch"},
 	)
 
-	wrappedRegisterer.MustRegister(httpRequests)
-	wrappedRegisterer.MustRegister(requestDuration)
-	wrappedRegisterer.MustRegister(apiCallDuration)
-	wrappedRegisterer.MustRegister(epochNumber)
-	wrappedRegisterer.MustRegister(protocolDuration)
-	wrappedRegisterer.MustRegister(epochDuration)
-	wrappedRegisterer.MustRegister(epochDuration1)
+	// // wrappedRegisterer.MustRegister(httpRequests)
+	// wrappedRegisterer.MustRegister(requestDuration)
+	// wrappedRegisterer.MustRegister(apiCallDuration)
+	// wrappedRegisterer.MustRegister(epochNumber)
+	// wrappedRegisterer.MustRegister(protocolDuration)
+	// wrappedRegisterer.MustRegister(epochDuration)
+	// wrappedRegisterer.MustRegister(epochDuration1)
 
 }
 
@@ -1345,7 +1345,8 @@ func (s *Server) consumePackageArray() {
 
 		// Process the package
 		// normalOut
-		normalOut, err := dag.Schedule(pkg.Transactions, &s.counter)
+		fmt.Printf("Processing package from broker %d, package ID %d\n", pkg.BrokerID, pkg.PackageID)
+		normalOut, err := dag.Schedule(pkg.Transactions,&s.counter)
 		if err != nil {
 			log.Println("Error scheduling transactions:", err)
 			continue
@@ -1354,7 +1355,7 @@ func (s *Server) consumePackageArray() {
 	}
 }
 
-func main() {
+func Main() {
 
 	// Parse command line arguments
 	var directoryIP string
@@ -1407,8 +1408,7 @@ func main() {
 		return
 	}
 
-	// Only in memory currently, will change later.
-	db, err := badger.OpenManaged(badger.DefaultOptions("").WithInMemory(true))
+	db, err := badger.OpenManaged(badger.DefaultOptions("./data"))
 	if err != nil {
 		log.Fatalf("Failed to open BadgerDB: %v", err)
 	}
@@ -1469,7 +1469,7 @@ func main() {
 	go server.startWriters()
 	//go server.writeToFile()
 	// Starts the package execution goroutine.
-	//go server.consumePackageArray()
+	go server.consumePackageArray()
 
 	// Graceful shutdown handling
 	go func() {

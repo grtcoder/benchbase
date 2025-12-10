@@ -47,3 +47,6 @@ scripts/storage-reader
 
 scripts/package*
 scripts/logs
+
+logs/
+data/
