@@ -33,8 +33,20 @@ func TestServer(t *testing.T) {
 		"-directoryIP=127.0.0.1",
 		"-directoryPort=8080",
 		"-brokerIP=127.0.0.1",
+		"-brokerPort=9080",
+		"-logFile=./logs/test_broker_1.log",
+	}
+	go broker.Main()
+	time.Sleep(1 * time.Second) // Give directory time to start
+
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	os.Args = []string{
+		"cmd",
+		"-directoryIP=127.0.0.1",
+		"-directoryPort=8080",
+		"-brokerIP=127.0.0.1",
 		"-brokerPort=9090",
-		"-logFile=./logs/test_broker.log",
+		"-logFile=./logs/test_broker_2.log",
 	}
 	go broker.Main()
 	time.Sleep(1 * time.Second) // Give directory time to start
@@ -63,5 +75,5 @@ func TestServer(t *testing.T) {
 		"-logFile=./logs/test_server.log",
 	}
 	go server.Main()
-	time.Sleep(10 * time.Second) // Let the services run for a while
+	time.Sleep(20 * time.Second) // Let the services run for a while
 }

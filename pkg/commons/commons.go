@@ -71,6 +71,16 @@ type DirectoryMap struct {
 	sync.RWMutex
 }
 
+func (m *DirectoryMap) getKeys() []int {
+	m.RLock()
+	defer m.RUnlock()
+	keys := make([]int, 0, len(m.Data))
+	for k := range m.Data {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 type NodesMap struct {
 	ServerMap *DirectoryMap `json:"serverMap"`
 	BrokerMap *DirectoryMap `json:"brokerMap"`

@@ -8,6 +8,7 @@ import (
 	"io"
 	"lockfreemachine/pkg/commons"
 	"lockfreemachine/pkg/dag"
+	"sort"
 
 	"errors"
 	"log"
@@ -257,6 +258,9 @@ type Server struct {
 	active     atomic.Pointer[map[int]*commons.StateList]
 	db         *badger.DB
 	counter    int
+
+	// Start processing packages for current epoch
+	handlePackage chan struct{}
 }
 
 // requestPackage sends a request to the server to get a package.
@@ -1317,11 +1321,16 @@ func (s *Server) protocolDaemon(ctx context.Context, nextRun time.Time) {
 		//logger.Warn("setting up answer map for next epoch")
 		s.canReceive = false // if you want to close reception 5ms early
 		//s.setupAnswerMap()   // set up the answer map for the next epoch
+
 		curLen := s.packageArray.Len()
 		logger.Info("Protocol Completed")
 		logger.Warn("Cur package array length: ", zap.Int64("curLen", curLen))
 		logger.Warn("Time time time: ", zap.Float64("duration", duration))
 		logger.Warn("Next run will happen at: ", zap.Time("nextRun", nextRun))
+
+		// Initiate processing of packages from this epoch.
+		s.handlePackage <- struct{}{}
+		fmt.Printf("Signaled package consumer to process packages for epoch %d\n", s.packageCounter-1)
 		if s.packageCounter == 500 {
 			logger.Warn("5000 epochs done, ending experiment")
 			return
@@ -1330,28 +1339,46 @@ func (s *Server) protocolDaemon(ctx context.Context, nextRun time.Time) {
 }
 
 func (s *Server) consumePackageArray() {
-	for {
-		item, err := s.packageArray.Get()
-		if err != nil {
-			log.Println("Error getting from packageArray:", err)
-			return
-		}
+	fmt.Printf("Package consumer started\n")
+	for range s.handlePackage {
+		fmt.Printf("Package consumer woke up to process packages for epoch %d\n", s.packageCounter-1)
+		currPackageCounter := s.packageCounter-1
+		// Get a list of brokers whose packages are in Received state.
+		brokerList := s.getBrokerList(commons.Received)
+		// Sort the broker list to ensure deterministic processing order.
+		sort.Ints(brokerList)
+		fmt.Printf("Processing packages for epoch %d, broker list: %v\n", currPackageCounter, brokerList)
+		for _,brokerID := range brokerList {
+			// fmt.Printf("Processing package for broker %d, package ID %d\n", brokerID, currPackageCounter)
+			currNode := s.packageArray.PeekHead()
+			pkg := &commons.Package{}
+			for currNode != nil {
+				pkg = currNode.GetPackage()
+				fmt.Printf("Checking package: brokerID %d, packageID %d\n", pkg.BrokerID, pkg.PackageID)
+				if pkg.BrokerID == brokerID  && pkg.PackageID == currPackageCounter{
+					break
+				}
+				currNode = currNode.GetNext()
+			}
 
-		pkg, ok := item.(*commons.Package)
-		if !ok {
-			log.Println("Invalid package type")
-			continue
+			if currNode==nil {
+				// fmt.Printf("Package not found in packageArray for processing, but was set to Received state. brokerID: %d, packageID: %d\n", brokerID, currPackageCounter)
+				logger.Error("Package not found in packageArray for processing, but was set to Received state", zap.Int("brokerID", brokerID), zap.Int("packageID", currPackageCounter))
+				continue
+			}
+	
+			// Process the package
+			// normalOut
+			fmt.Printf("Processing package from broker %d, package ID %d\n", pkg.BrokerID, pkg.PackageID)
+			normalOut, err := dag.Schedule(pkg.Transactions,&s.counter)
+			if err != nil {
+				log.Println("Error scheduling transactions:", err)
+				continue
+			}
+			dag.ExecuteParallel(s.db, pkg.Transactions, normalOut)
+			s.packageArray.RemoveNode(currNode)
+			currPackageCounter++
 		}
-
-		// Process the package
-		// normalOut
-		fmt.Printf("Processing package from broker %d, package ID %d\n", pkg.BrokerID, pkg.PackageID)
-		normalOut, err := dag.Schedule(pkg.Transactions,&s.counter)
-		if err != nil {
-			log.Println("Error scheduling transactions:", err)
-			continue
-		}
-		dag.ExecuteParallel(s.db, pkg.Transactions, normalOut)
 	}
 }
 
@@ -1443,6 +1470,7 @@ func Main() {
 
 	defer logger.Sync()
 
+	handlePackage := make(chan struct{},5)
 	server := &Server{
 		ip:             serverIP,
 		port:           serverPort,
@@ -1457,6 +1485,7 @@ func Main() {
 		dropRate:       dropRate,
 		canReceive:     true,
 		db:             db,
+		handlePackage: handlePackage,
 	}
 
 	httpServer, err := server.setupServer()
@@ -1509,6 +1538,7 @@ func Main() {
 		logger.Error("HTTP shutdown error", zap.Error(err))
 	}
 	close(server.writeChan)
+	close(server.handlePackage)
 	logger.Warn("Server stopped.")
 
 }

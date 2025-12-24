@@ -50,3 +50,5 @@ scripts/logs
 
 logs/
 data/
+
+packages_*/
