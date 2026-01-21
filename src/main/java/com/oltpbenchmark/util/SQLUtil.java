@@ -216,7 +216,7 @@ public abstract class SQLUtil {
       // NOTE: This likely only handles certain syntaxes for defaults.
       sql =
           String.format(
-              """
+"""
 SELECT REPLACE(REPLACE([definition], '(NEXT VALUE FOR [', ''), '])', '') AS seq
 FROM sys.default_constraints dc
 JOIN sys.columns c ON c.default_object_id=dc.object_id
