@@ -28,10 +28,14 @@ package com.oltpbenchmark.benchmarks.smallbank.procedures;
 import com.oltpbenchmark.api.Procedure;
 import com.oltpbenchmark.api.SQLStmt;
 import com.oltpbenchmark.benchmarks.smallbank.SmallBankConstants;
+import com.oltpbenchmark.benchmarks.smallbank.SmallBankRestClient;
+import com.oltpbenchmark.benchmarks.smallbank.SmallBankRestClient.Operation;
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.Arrays;
 
 public class Balance extends Procedure {
 
@@ -86,5 +90,15 @@ public class Balance extends Procedure {
     }
 
     return checkingBalance + savingsBalance;
+  }
+
+  public void run(SmallBankRestClient client, long custId) throws IOException {
+    client.sendTransaction(
+        SmallBankRestClient.TX_BALANCE,
+        Arrays.asList(
+            new Operation(SmallBankRestClient.accountKey(custId), "", SmallBankRestClient.OP_READ),
+            new Operation(SmallBankRestClient.savingsKey(custId), "", SmallBankRestClient.OP_READ),
+            new Operation(
+                SmallBankRestClient.checkingKey(custId), "", SmallBankRestClient.OP_READ)));
   }
 }

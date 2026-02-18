@@ -28,10 +28,14 @@ package com.oltpbenchmark.benchmarks.smallbank.procedures;
 import com.oltpbenchmark.api.Procedure;
 import com.oltpbenchmark.api.SQLStmt;
 import com.oltpbenchmark.benchmarks.smallbank.SmallBankConstants;
+import com.oltpbenchmark.benchmarks.smallbank.SmallBankRestClient;
+import com.oltpbenchmark.benchmarks.smallbank.SmallBankRestClient.Operation;
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.Arrays;
 
 /**
  * SendPayment Procedure
@@ -109,5 +113,23 @@ public class SendPayment extends Procedure {
         this.getPreparedStatement(conn, UpdateCheckingBalance, amount, destAcct)) {
       updateStmt.executeUpdate();
     }
+  }
+
+  public void run(SmallBankRestClient client, long sendAcct, long destAcct, double amount)
+      throws IOException {
+    String amountStr = Long.toString((long) amount);
+    client.sendTransaction(
+        SmallBankRestClient.TX_SEND_PAYMENT,
+        Arrays.asList(
+            new Operation(
+                SmallBankRestClient.accountKey(sendAcct), "", SmallBankRestClient.OP_READ),
+            new Operation(
+                SmallBankRestClient.accountKey(destAcct), "", SmallBankRestClient.OP_READ),
+            new Operation(
+                SmallBankRestClient.checkingKey(sendAcct), amountStr, SmallBankRestClient.OP_WRITE),
+            new Operation(
+                SmallBankRestClient.checkingKey(destAcct),
+                amountStr,
+                SmallBankRestClient.OP_WRITE)));
   }
 }

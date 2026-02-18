@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<parameters>
+
+    <!-- Dummy JDBC connection (required by BenchBase framework, not used for actual work) -->
+    <type>SQLITE</type>
+    <driver>org.sqlite.JDBC</driver>
+    <url>jdbc:sqlite::memory:</url>
+    <isolation>TRANSACTION_SERIALIZABLE</isolation>
+    <batchsize>32</batchsize>
+
+    <!-- Broker REST endpoint -->
+    <brokerHost>localhost</brokerHost>
+    <brokerPort>9080</brokerPort>
+
+    <scalefactor>1</scalefactor>
+    <loaderThreads>4</loaderThreads>
+
+    <!-- The workload -->
+    <terminals>1</terminals>
+    <works>
+        <work>
+            <time>60</time>
+            <rate>100</rate>
+            <weights>15,15,15,25,15,15</weights>
+        </work>
+    </works>
+
+    <!-- SmallBank Procedures declaration -->
+    <transactiontypes>
+        <transactiontype>
+            <name>Amalgamate</name>
+        </transactiontype>
+        <transactiontype>
+            <name>Balance</name>
+        </transactiontype>
+        <transactiontype>
+            <name>DepositChecking</name>
+        </transactiontype>
+        <transactiontype>
+            <name>SendPayment</name>
+        </transactiontype>
+        <transactiontype>
+            <name>TransactSavings</name>
+        </transactiontype>
+        <transactiontype>
+            <name>WriteCheck</name>
+        </transactiontype>
+    </transactiontypes>
+</parameters>

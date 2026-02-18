@@ -28,10 +28,14 @@ package com.oltpbenchmark.benchmarks.smallbank.procedures;
 import com.oltpbenchmark.api.Procedure;
 import com.oltpbenchmark.api.SQLStmt;
 import com.oltpbenchmark.benchmarks.smallbank.SmallBankConstants;
+import com.oltpbenchmark.benchmarks.smallbank.SmallBankRestClient;
+import com.oltpbenchmark.benchmarks.smallbank.SmallBankRestClient.Operation;
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.Arrays;
 
 /**
  * TransactSavings Procedure Original version by Mohammad Alomari and Michael Cahill
@@ -95,5 +99,16 @@ public class TransactSavings extends Procedure {
         this.getPreparedStatement(conn, UpdateSavingsBalance, amount, custId)) {
       stmt.executeUpdate();
     }
+  }
+
+  public void run(SmallBankRestClient client, long custId, double amount) throws IOException {
+    client.sendTransaction(
+        SmallBankRestClient.TX_TRANSACT_SAV,
+        Arrays.asList(
+            new Operation(SmallBankRestClient.accountKey(custId), "", SmallBankRestClient.OP_READ),
+            new Operation(
+                SmallBankRestClient.savingsKey(custId),
+                Long.toString((long) amount),
+                SmallBankRestClient.OP_WRITE)));
   }
 }

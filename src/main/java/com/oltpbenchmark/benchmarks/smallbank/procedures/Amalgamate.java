@@ -28,10 +28,14 @@ package com.oltpbenchmark.benchmarks.smallbank.procedures;
 import com.oltpbenchmark.api.Procedure;
 import com.oltpbenchmark.api.SQLStmt;
 import com.oltpbenchmark.benchmarks.smallbank.SmallBankConstants;
+import com.oltpbenchmark.benchmarks.smallbank.SmallBankRestClient;
+import com.oltpbenchmark.benchmarks.smallbank.SmallBankRestClient.Operation;
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.Arrays;
 
 /**
  * Amalgamate Procedure Original version by Mohammad Alomari and Michael Cahill
@@ -96,45 +100,20 @@ public class Amalgamate extends Procedure {
 
     // Get Balance Information
     double savingsBalance;
-    try (PreparedStatement balStmt0 = this.getPreparedStatement(conn, GetSavingsBalance, custId0)) {
-      try (ResultSet balRes0 = balStmt0.executeQuery()) {
-        if (!balRes0.next()) {
-          String msg =
-              String.format(
-                  "No %s for customer #%d", SmallBankConstants.TABLENAME_SAVINGS, custId0);
-          throw new UserAbortException(msg);
-        }
-        savingsBalance = balRes0.getDouble(1);
-      }
-    }
+  }
 
-    double checkingBalance;
-    try (PreparedStatement balStmt1 =
-        this.getPreparedStatement(conn, GetCheckingBalance, custId1)) {
-      try (ResultSet balRes1 = balStmt1.executeQuery()) {
-        if (!balRes1.next()) {
-          String msg =
-              String.format(
-                  "No %s for customer #%d", SmallBankConstants.TABLENAME_CHECKING, custId1);
-          throw new UserAbortException(msg);
-        }
-
-        checkingBalance = balRes1.getDouble(1);
-      }
-    }
-
-    double total = checkingBalance + savingsBalance;
-    // assert(total >= 0);
-
-    // Update Balance Information
-    try (PreparedStatement updateStmt0 =
-        this.getPreparedStatement(conn, ZeroCheckingBalance, custId0)) {
-      updateStmt0.executeUpdate();
-    }
-
-    try (PreparedStatement updateStmt1 =
-        this.getPreparedStatement(conn, UpdateSavingsBalance, total, custId1)) {
-      updateStmt1.executeUpdate();
-    }
+  public void run(SmallBankRestClient client, long custId0, long custId1) throws IOException {
+    client.sendTransaction(
+        SmallBankRestClient.TX_AMALGAMATE,
+        Arrays.asList(
+            new Operation(SmallBankRestClient.accountKey(custId0), "", SmallBankRestClient.OP_READ),
+            new Operation(SmallBankRestClient.accountKey(custId1), "", SmallBankRestClient.OP_READ),
+            new Operation(SmallBankRestClient.savingsKey(custId0), "", SmallBankRestClient.OP_READ),
+            new Operation(
+                SmallBankRestClient.checkingKey(custId1), "", SmallBankRestClient.OP_READ),
+            new Operation(
+                SmallBankRestClient.checkingKey(custId0), "0", SmallBankRestClient.OP_WRITE),
+            new Operation(
+                SmallBankRestClient.savingsKey(custId1), "0", SmallBankRestClient.OP_WRITE)));
   }
 }
