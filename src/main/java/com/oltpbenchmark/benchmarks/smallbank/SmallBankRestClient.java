@@ -36,7 +36,11 @@ public class SmallBankRestClient {
 
   public SmallBankRestClient(String brokerHost, int brokerPort) {
     this.brokerUrl = "http://" + brokerHost + ":" + brokerPort + "/addTransaction";
-    this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+    this.httpClient =
+        HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_1_1)
+            .connectTimeout(Duration.ofSeconds(5))
+            .build();
   }
 
   /** Send a transaction to the broker. */
