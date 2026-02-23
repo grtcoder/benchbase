@@ -61,6 +61,7 @@ public final class SmallBankLoader extends Loader<SmallBankBenchmark> {
     private final long start;
     private final long stop;
     private final DiscreteRNG randBalance;
+    private final SmallBankRestClient client;
 
     public Generator(long start, long stop) {
       super(benchmark);
@@ -69,11 +70,11 @@ public final class SmallBankLoader extends Loader<SmallBankBenchmark> {
       this.randBalance =
           new Gaussian(
               benchmark.rng(), SmallBankConstants.MIN_BALANCE, SmallBankConstants.MAX_BALANCE);
+      this.client = benchmark.newRestClient();
     }
 
     @Override
     public void load(Connection conn) {
-      SmallBankRestClient client = SmallBankLoader.this.benchmark.getRestClient();
 
       try {
         for (long acctId = this.start; acctId < this.stop; acctId++) {

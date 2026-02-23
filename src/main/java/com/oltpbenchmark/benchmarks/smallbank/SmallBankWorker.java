@@ -63,7 +63,7 @@ public final class SmallBankWorker extends Worker<SmallBankBenchmark> {
     this.procWriteCheck = this.getProcedure(WriteCheck.class);
 
     this.numAccounts = benchmarkModule.numAccounts;
-    this.restClient = benchmarkModule.getRestClient();
+    this.restClient = benchmarkModule.newRestClient();
     this.rng = new Flat(rng(), 0, this.numAccounts);
   }
 

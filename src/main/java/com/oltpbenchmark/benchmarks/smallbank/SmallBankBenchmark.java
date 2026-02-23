@@ -31,15 +31,16 @@ import java.util.List;
 public final class SmallBankBenchmark extends BenchmarkModule {
 
   protected final long numAccounts;
-  private final SmallBankRestClient restClient;
+  private final String brokerHost;
+  private final int brokerPort;
 
   public SmallBankBenchmark(WorkloadConfiguration workConf) {
     super(workConf);
     this.numAccounts =
         (int) Math.round(SmallBankConstants.NUM_ACCOUNTS * workConf.getScaleFactor());
 
-    String brokerHost = "localhost";
-    int brokerPort = 9080;
+    String brokerHost = "127.0.0.1";
+    int brokerPort = 8090;
     if (workConf.getXmlConfig() != null) {
       if (workConf.getXmlConfig().containsKey("brokerHost")) {
         brokerHost = workConf.getXmlConfig().getString("brokerHost");
@@ -48,11 +49,12 @@ public final class SmallBankBenchmark extends BenchmarkModule {
         brokerPort = workConf.getXmlConfig().getInt("brokerPort");
       }
     }
-    this.restClient = new SmallBankRestClient(brokerHost, brokerPort);
+    this.brokerHost = brokerHost;
+    this.brokerPort = brokerPort;
   }
 
-  public SmallBankRestClient getRestClient() {
-    return this.restClient;
+  public SmallBankRestClient newRestClient() {
+    return new SmallBankRestClient(brokerHost, brokerPort);
   }
 
   @Override
