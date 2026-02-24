@@ -7,6 +7,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,12 +31,12 @@ public class SmallBankRestClient {
   public static final int OP_DELETE = 2;
   public static final int OP_READ = 3;
 
-  private final String brokerUrl;
+  private final List<String> brokerUrls;
   private final HttpClient httpClient;
   private final AtomicLong idCounter = new AtomicLong(0);
 
-  public SmallBankRestClient(String brokerHost, int brokerPort) {
-    this.brokerUrl = "http://" + brokerHost + ":" + brokerPort + "/addTransaction";
+  public SmallBankRestClient(List<String> brokerUrls) {
+    this.brokerUrls = brokerUrls;
     this.httpClient =
         HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
@@ -62,6 +63,7 @@ public class SmallBankRestClient {
     }
     json.append("]}");
 
+    String brokerUrl = brokerUrls.get(ThreadLocalRandom.current().nextInt(brokerUrls.size()));
     HttpRequest request =
         HttpRequest.newBuilder()
             .uri(URI.create(brokerUrl))

@@ -8,9 +8,10 @@
     <isolation>TRANSACTION_SERIALIZABLE</isolation>
     <batchsize>32</batchsize>
 
-    <!-- Broker REST endpoint -->
-    <brokerHost>localhost</brokerHost>
-    <brokerPort>9080</brokerPort>
+    <!-- Broker REST endpoints (add more <broker> entries to distribute load across multiple brokers) -->
+    <brokers>
+        <broker><host>127.0.0.1</host><port>8090</port></broker>
+    </brokers>
 
     <scalefactor>1</scalefactor>
     <loaderThreads>4</loaderThreads>

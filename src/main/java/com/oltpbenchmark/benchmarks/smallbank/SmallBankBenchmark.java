@@ -31,30 +31,36 @@ import java.util.List;
 public final class SmallBankBenchmark extends BenchmarkModule {
 
   protected final long numAccounts;
-  private final String brokerHost;
-  private final int brokerPort;
+  private final List<String> brokerUrls;
 
   public SmallBankBenchmark(WorkloadConfiguration workConf) {
     super(workConf);
     this.numAccounts =
         (int) Math.round(SmallBankConstants.NUM_ACCOUNTS * workConf.getScaleFactor());
 
-    String brokerHost = "127.0.0.1";
-    int brokerPort = 8090;
+    List<String> urls = new ArrayList<>();
     if (workConf.getXmlConfig() != null) {
-      if (workConf.getXmlConfig().containsKey("brokerHost")) {
-        brokerHost = workConf.getXmlConfig().getString("brokerHost");
+      if (workConf.getXmlConfig().containsKey("brokers.broker(0).host")) {
+        int i = 0;
+        while (workConf.getXmlConfig().containsKey("brokers.broker(" + i + ").host")) {
+          String host = workConf.getXmlConfig().getString("brokers.broker(" + i + ").host");
+          int port = workConf.getXmlConfig().getInt("brokers.broker(" + i + ").port");
+          urls.add("http://" + host + ":" + port + "/addTransaction");
+          i++;
+        }
+      } else {
+        String host = workConf.getXmlConfig().getString("brokerHost", "127.0.0.1");
+        int port = workConf.getXmlConfig().getInt("brokerPort", 8090);
+        urls.add("http://" + host + ":" + port + "/addTransaction");
       }
-      if (workConf.getXmlConfig().containsKey("brokerPort")) {
-        brokerPort = workConf.getXmlConfig().getInt("brokerPort");
-      }
+    } else {
+      urls.add("http://127.0.0.1:8090/addTransaction");
     }
-    this.brokerHost = brokerHost;
-    this.brokerPort = brokerPort;
+    this.brokerUrls = urls;
   }
 
   public SmallBankRestClient newRestClient() {
-    return new SmallBankRestClient(brokerHost, brokerPort);
+    return new SmallBankRestClient(brokerUrls);
   }
 
   @Override
