@@ -40,11 +40,11 @@ public final class SmallBankBenchmark extends BenchmarkModule {
 
     List<String> urls = new ArrayList<>();
     if (workConf.getXmlConfig() != null) {
-      if (workConf.getXmlConfig().containsKey("brokers.broker(0).host")) {
-        int i = 0;
-        while (workConf.getXmlConfig().containsKey("brokers.broker(" + i + ").host")) {
-          String host = workConf.getXmlConfig().getString("brokers.broker(" + i + ").host");
-          int port = workConf.getXmlConfig().getInt("brokers.broker(" + i + ").port");
+      if (workConf.getXmlConfig().containsKey("brokers/broker[1]/host")) {
+        int i = 1;
+        while (workConf.getXmlConfig().containsKey("brokers/broker[" + i + "]/host")) {
+          String host = workConf.getXmlConfig().getString("brokers/broker[" + i + "]/host");
+          int port = workConf.getXmlConfig().getInt("brokers/broker[" + i + "]/port");
           urls.add("http://" + host + ":" + port + "/addTransaction");
           i++;
         }

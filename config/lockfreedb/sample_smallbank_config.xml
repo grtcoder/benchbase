@@ -14,7 +14,7 @@
     </brokers>
 
     <scalefactor>1</scalefactor>
-    <loaderThreads>4</loaderThreads>
+    <loaderThreads>1</loaderThreads>
 
     <!-- The workload -->
     <terminals>1</terminals>
