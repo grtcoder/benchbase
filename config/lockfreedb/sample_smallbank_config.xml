@@ -10,7 +10,7 @@
 
     <!-- Broker REST endpoints (add more <broker> entries to distribute load across multiple brokers) -->
     <brokers>
-        <broker><host>127.0.0.1</host><port>8090</port></broker>
+        <broker><host>broker1.alpha-test.l-free-machine.emulab.net</host><port>8083</port></broker>
     </brokers>
 
     <scalefactor>1</scalefactor>
