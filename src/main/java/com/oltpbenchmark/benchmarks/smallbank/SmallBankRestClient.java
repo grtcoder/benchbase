@@ -47,11 +47,12 @@ public class SmallBankRestClient {
   /** Send a transaction to the broker. */
   public void sendTransaction(int transactionType, List<Operation> operations) throws IOException {
     long id = idCounter.incrementAndGet();
-    long timestamp = System.nanoTime();
-
+    long assignedTs = 0;
     StringBuilder json = new StringBuilder();
     json.append("{\"id\":").append(id);
-    json.append(",\"timestamp\":").append(timestamp);
+    json.append(",\"timestamp\":{\"EpochID\":0,\"BrokerID\":0,\"AssignedTs\":")
+        .append(assignedTs)
+        .append("}");
     json.append(",\"TransactionType\":").append(transactionType);
     json.append(",\"operations\":[");
     for (int i = 0; i < operations.size(); i++) {

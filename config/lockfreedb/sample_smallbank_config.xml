@@ -14,10 +14,10 @@
     </brokers>
 
     <scalefactor>1</scalefactor>
-    <loaderThreads>1</loaderThreads>
+    <loaderThreads>4</loaderThreads>
 
     <!-- The workload -->
-    <terminals>1</terminals>
+    <terminals>4</terminals>
     <works>
         <work>
             <time>60</time>
