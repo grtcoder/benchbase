@@ -5,7 +5,10 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.time.Duration;
+import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
@@ -30,6 +33,11 @@ public class SmallBankRestClient {
   public static final int OP_WRITE = 1;
   public static final int OP_DELETE = 2;
   public static final int OP_READ = 3;
+
+  // Key type suffix bytes
+  private static final byte KEY_ACCOUNTS = 0x01;
+  private static final byte KEY_SAVINGS = 0x02;
+  private static final byte KEY_CHECKING = 0x03;
 
   private final List<String> brokerUrls;
   private final HttpClient httpClient;
@@ -84,17 +92,24 @@ public class SmallBankRestClient {
     }
   }
 
-  // Key format helpers matching Go's smallbank_transactions.go
+  // Key format helpers: 8-byte little-endian custId + 1-byte type suffix, base64-encoded
+  private static byte[] buildKey(byte type, long custId) {
+    byte[] b = new byte[9];
+    ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN).putLong(custId);
+    b[8] = type;
+    return b;
+  }
+
   public static String accountKey(long custId) {
-    return "accounts_id_" + custId;
+    return Base64.getEncoder().encodeToString(buildKey(KEY_ACCOUNTS, custId));
   }
 
   public static String savingsKey(long custId) {
-    return "savings_bal_" + custId;
+    return Base64.getEncoder().encodeToString(buildKey(KEY_SAVINGS, custId));
   }
 
   public static String checkingKey(long custId) {
-    return "checking_bal_" + custId;
+    return Base64.getEncoder().encodeToString(buildKey(KEY_CHECKING, custId));
   }
 
   private static String escapeJson(String s) {
